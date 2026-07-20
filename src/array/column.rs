@@ -1,1 +1,182 @@
 //! `Column`, `ColumnData`. See LLD §2.4.
+
+use super::validity::Validity;
+use crate::error::{BasaltError, Result};
+use crate::types::data_type::DataType;
+use crate::types::value::Value;
+
+/// The typed data of a column. One Vec per supported type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnData {
+    Int64(Vec<i64>),
+    Float64(Vec<f64>),
+    Utf8(Vec<String>),
+    Boolean(Vec<bool>),
+}
+
+impl ColumnData {
+    fn len(&self) -> usize {
+        match self {
+            ColumnData::Int64(v) => v.len(),
+            ColumnData::Float64(v) => v.len(),
+            ColumnData::Utf8(v) => v.len(),
+            ColumnData::Boolean(v) => v.len(),
+        }
+    }
+
+    fn data_type(&self) -> DataType {
+        match self {
+            ColumnData::Int64(_) => DataType::Int64,
+            ColumnData::Float64(_) => DataType::Float64,
+            ColumnData::Utf8(_) => DataType::Utf8,
+            ColumnData::Boolean(_) => DataType::Boolean,
+        }
+    }
+
+    fn value_at(&self, index: usize) -> Value {
+        match self {
+            ColumnData::Int64(v) => Value::Int64(v[index]),
+            ColumnData::Float64(v) => Value::Float64(v[index]),
+            ColumnData::Utf8(v) => Value::Utf8(v[index].clone()),
+            ColumnData::Boolean(v) => Value::Boolean(v[index]),
+        }
+    }
+
+    fn take(&self, indices: &[usize]) -> ColumnData {
+        match self {
+            ColumnData::Int64(v) => ColumnData::Int64(indices.iter().map(|&i| v[i]).collect()),
+            ColumnData::Float64(v) => ColumnData::Float64(indices.iter().map(|&i| v[i]).collect()),
+            ColumnData::Utf8(v) => {
+                ColumnData::Utf8(indices.iter().map(|&i| v[i].clone()).collect())
+            }
+            ColumnData::Boolean(v) => {
+                ColumnData::Boolean(indices.iter().map(|&i| v[i]).collect())
+            }
+        }
+    }
+}
+
+/// A column: typed data plus optional null tracking.
+/// Invariants:
+///   I1. validity.is_none()  =>  the column contains no nulls
+///   I2. validity.is_some()  =>  validity.len() == data length
+///   I3. slots marked null still hold a well-formed (garbage) value in `data`
+#[derive(Debug, Clone, PartialEq)]
+pub struct Column {
+    data: ColumnData,
+    validity: Option<Validity>,
+}
+
+impl Column {
+    /// Constructs directly from parts. Used by `ColumnBuilder::finish`.
+    /// `debug_assert`s I2 rather than returning `Result` — a violation here
+    /// is an internal bug, not user-facing.
+    pub(crate) fn from_parts(data: ColumnData, validity: Option<Validity>) -> Self {
+        if let Some(v) = &validity {
+            debug_assert_eq!(v.len(), data.len());
+        }
+        Column { data, validity }
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.len() == 0
+    }
+
+    pub fn data_type(&self) -> DataType {
+        self.data.data_type()
+    }
+
+    pub fn null_count(&self) -> usize {
+        self.validity.as_ref().map_or(0, Validity::null_count)
+    }
+
+    pub fn is_null(&self, index: usize) -> bool {
+        self.validity.as_ref().is_some_and(|v| v.is_null(index))
+    }
+
+    /// Materialize one scalar. None if index out of bounds; Some(Value::Null) if null.
+    pub fn get(&self, index: usize) -> Option<Value> {
+        if index >= self.len() {
+            return None;
+        }
+        if self.is_null(index) {
+            return Some(Value::Null);
+        }
+        Some(self.data.value_at(index))
+    }
+
+    /// Produce a new Column containing only the given row positions, in order.
+    /// Used by filter (selection vector) and sort (permutation).
+    pub fn take(&self, indices: &[usize]) -> Result<Column> {
+        for &i in indices {
+            if i >= self.len() {
+                return Err(BasaltError::Internal(format!(
+                    "take index {i} out of bounds for column of length {}",
+                    self.len()
+                )));
+            }
+        }
+        let data = self.data.take(indices);
+        let validity = self.validity.as_ref().map(|v| v.take(indices));
+        Ok(Column::from_parts(data, validity))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::array::validity::Validity;
+
+    fn int_column() -> Column {
+        Column::from_parts(
+            ColumnData::Int64(vec![10, 20, 30]),
+            Some(Validity::from_flags(vec![true, false, true])),
+        )
+    }
+
+    #[test]
+    fn no_validity_means_no_nulls() {
+        let c = Column::from_parts(ColumnData::Int64(vec![1, 2]), None);
+        assert_eq!(c.null_count(), 0);
+        assert!(!c.is_null(0));
+        assert_eq!(c.get(0), Some(Value::Int64(1)));
+    }
+
+    #[test]
+    fn get_returns_null_for_null_slots() {
+        let c = int_column();
+        assert_eq!(c.get(1), Some(Value::Null));
+        assert_eq!(c.get(0), Some(Value::Int64(10)));
+    }
+
+    #[test]
+    fn get_out_of_bounds_is_none() {
+        let c = int_column();
+        assert_eq!(c.get(99), None);
+    }
+
+    #[test]
+    fn take_reorders_data_and_validity() {
+        let c = int_column();
+        let taken = c.take(&[2, 1, 0]).unwrap();
+        assert_eq!(taken.get(0), Some(Value::Int64(30)));
+        assert_eq!(taken.get(1), Some(Value::Null));
+        assert_eq!(taken.get(2), Some(Value::Int64(10)));
+    }
+
+    #[test]
+    fn take_out_of_bounds_errors() {
+        let c = int_column();
+        assert!(c.take(&[5]).is_err());
+    }
+
+    #[test]
+    fn data_type_matches_variant() {
+        let c = Column::from_parts(ColumnData::Utf8(vec!["a".into()]), None);
+        assert_eq!(c.data_type(), DataType::Utf8);
+    }
+}
