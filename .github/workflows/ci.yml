@@ -1,9 +1,9 @@
 name: CI
 
+# Paused: auto-triggers off until repo is ready for CI on every push/PR.
+# Re-enable by restoring the push/pull_request triggers below.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
