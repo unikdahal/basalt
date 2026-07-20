@@ -5,8 +5,8 @@
 //! implicit cast promotions where needed, and derives the final output schema.
 
 use crate::error::{BasaltError, Result};
-use crate::sql::ast;
 use crate::expr::expr::{Expr, UnaryOp};
+use crate::sql::ast;
 use crate::types::data_type::DataType;
 use crate::types::schema::{Field, Schema};
 use crate::types::value::Value;
@@ -150,10 +150,13 @@ impl<'a> Binder<'a> {
                 // Name resolution mapping to indices:
                 // We resolve the identifier against column index offsets in the schema.
                 // Resolving this once at bind time prevents string matches at runtime.
-                let index = self.schema.index_of(name).ok_or_else(|| {
-                    BasaltError::UnknownColumn { name: name.clone() }
-                })?;
-                let field = self.schema.field(index).unwrap();
+                let (index, field) = self
+                    .schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, f)| &f.name == name)
+                    .ok_or_else(|| BasaltError::UnknownColumn { name: name.clone() })?;
                 Ok(Expr::Column {
                     index,
                     data_type: field.data_type,
@@ -256,7 +259,8 @@ mod tests {
             Field::new("id", DataType::Int64, false),
             Field::new("name", DataType::Utf8, false),
             Field::new("score", DataType::Float64, true),
-        ]).unwrap()
+        ])
+        .unwrap()
     }
 
     fn bind_sql(sql: &str, schema: &Schema) -> BoundQuery {
@@ -313,7 +317,7 @@ mod tests {
         let mut parser = Parser::new(tokens);
         let stmt = parser.parse_statement().unwrap();
         let binder = Binder::new(&schema);
-        
+
         let err = binder.bind_statement(&stmt).unwrap_err();
         assert!(matches!(err, BasaltError::UnknownColumn { .. }));
     }
@@ -325,5 +329,65 @@ mod tests {
         assert_eq!(q.projections.len(), 2);
         assert_eq!(q.projections[0].output_name, "id");
         assert_eq!(q.projections[1].output_name, "id_alias");
+    }
+
+    #[test]
+    fn test_bind_order_by_unknown_column_errors() {
+        let schema = test_schema();
+        let mut lexer = Lexer::new("SELECT id FROM tbl ORDER BY fake_col");
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let stmt = parser.parse_statement().unwrap();
+        let binder = Binder::new(&schema);
+        let err = binder.bind_statement(&stmt).unwrap_err();
+        assert!(matches!(err, BasaltError::UnknownColumn { .. }));
+    }
+
+    #[test]
+    fn test_bind_where_on_non_boolean_expression_errors() {
+        let schema = test_schema();
+        let mut lexer = Lexer::new("SELECT id FROM tbl WHERE id");
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let stmt = parser.parse_statement().unwrap();
+        let binder = Binder::new(&schema);
+        let err = binder.bind_statement(&stmt).unwrap_err();
+        assert!(matches!(err, BasaltError::Type { .. }));
+    }
+
+    #[test]
+    fn test_bind_computed_expression_gets_generated_name() {
+        let schema = test_schema();
+        let q = bind_sql("SELECT id + 1 FROM tbl", &schema);
+        assert_eq!(q.projections[0].output_name, "expr_0");
+        assert_eq!(q.projections[0].expr.data_type().unwrap(), DataType::Int64);
+    }
+
+    #[test]
+    fn test_bind_cast_expression() {
+        let schema = test_schema();
+        let q = bind_sql("SELECT CAST(id AS Float64) FROM tbl", &schema);
+        assert_eq!(
+            q.projections[0].expr.data_type().unwrap(),
+            DataType::Float64
+        );
+        assert!(matches!(
+            q.projections[0].expr,
+            Expr::Cast {
+                to: DataType::Float64,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_bind_negate_non_numeric_column_errors() {
+        let schema = test_schema();
+        let mut lexer = Lexer::new("SELECT -name FROM tbl");
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let stmt = parser.parse_statement().unwrap();
+        let binder = Binder::new(&schema);
+        assert!(binder.bind_statement(&stmt).is_err());
     }
 }

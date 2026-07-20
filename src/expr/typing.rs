@@ -4,20 +4,18 @@
 //! relational type rules and coercion logic. It also propagates nullability.
 
 use crate::error::{BasaltError, Result};
-use crate::types::data_type::DataType;
-use crate::types::coercion::{coerce_binary, UnaryOp};
 use crate::expr::expr::Expr;
+use crate::types::coercion::{coerce_binary, UnaryOp};
+use crate::types::data_type::DataType;
 
 impl Expr {
     /// Compute the static output type of the expression.
     pub fn data_type(&self) -> Result<DataType> {
         match self {
             Expr::Column { data_type, .. } => Ok(*data_type),
-            Expr::Literal(val) => {
-                val.data_type().ok_or_else(|| BasaltError::Type {
-                    message: "untyped NULL literal has no static type".to_string(),
-                })
-            }
+            Expr::Literal(val) => val.data_type().ok_or_else(|| BasaltError::Type {
+                message: "untyped NULL literal has no static type".to_string(),
+            }),
             Expr::Binary { left, op, right } => {
                 let lhs = left.data_type()?;
                 let rhs = right.data_type()?;
@@ -32,7 +30,9 @@ impl Expr {
                             Ok(t)
                         } else {
                             Err(BasaltError::Type {
-                                message: format!("cannot apply unary negation (-) to non-numeric type {t}"),
+                                message: format!(
+                                    "cannot apply unary negation (-) to non-numeric type {t}"
+                                ),
                             })
                         }
                     }
@@ -41,7 +41,9 @@ impl Expr {
                             Ok(DataType::Boolean)
                         } else {
                             Err(BasaltError::Type {
-                                message: format!("cannot apply logical NOT to non-boolean type {t}"),
+                                message: format!(
+                                    "cannot apply logical NOT to non-boolean type {t}"
+                                ),
                             })
                         }
                     }
@@ -76,16 +78,28 @@ mod tests {
 
     #[test]
     fn test_column_typing() {
-        let col = Expr::Column { index: 0, data_type: DataType::Int64, nullable: false };
+        let col = Expr::Column {
+            index: 0,
+            data_type: DataType::Int64,
+            nullable: false,
+        };
         assert_eq!(col.data_type().unwrap(), DataType::Int64);
         assert!(!col.nullable());
     }
 
     #[test]
     fn test_binary_arithmetic_typing() {
-        let col_int = Expr::Column { index: 0, data_type: DataType::Int64, nullable: false };
-        let col_float = Expr::Column { index: 1, data_type: DataType::Float64, nullable: true };
-        
+        let col_int = Expr::Column {
+            index: 0,
+            data_type: DataType::Int64,
+            nullable: false,
+        };
+        let col_float = Expr::Column {
+            index: 1,
+            data_type: DataType::Float64,
+            nullable: true,
+        };
+
         // Int64 + Float64 -> Float64
         let add = Expr::Binary {
             left: Box::new(col_int.clone()),
@@ -98,12 +112,26 @@ mod tests {
 
     #[test]
     fn test_unary_typing() {
-        let col_int = Expr::Column { index: 0, data_type: DataType::Int64, nullable: false };
-        let neg = Expr::Unary { op: UnaryOp::Neg, expr: Box::new(col_int.clone()) };
+        let col_int = Expr::Column {
+            index: 0,
+            data_type: DataType::Int64,
+            nullable: false,
+        };
+        let neg = Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: Box::new(col_int.clone()),
+        };
         assert_eq!(neg.data_type().unwrap(), DataType::Int64);
 
-        let col_utf8 = Expr::Column { index: 1, data_type: DataType::Utf8, nullable: false };
-        let bad_neg = Expr::Unary { op: UnaryOp::Neg, expr: Box::new(col_utf8) };
+        let col_utf8 = Expr::Column {
+            index: 1,
+            data_type: DataType::Utf8,
+            nullable: false,
+        };
+        let bad_neg = Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: Box::new(col_utf8),
+        };
         assert!(bad_neg.data_type().is_err());
     }
 }

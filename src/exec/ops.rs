@@ -6,7 +6,7 @@ use crate::types::value::Value;
 use std::cmp::Ordering;
 
 /// Compare two non-null values for stable sorting.
-/// Handles float comparison by establishing a total ordering where NaN is considered 
+/// Handles float comparison by establishing a total ordering where NaN is considered
 /// larger than all other values (aligning with PostgreSQL and Spark conventions).
 pub fn compare_values(l: &Value, r: &Value) -> Option<Ordering> {
     match (l, r) {
@@ -37,16 +37,22 @@ mod tests {
         let nan = Value::Float64(f64::NAN);
         let zero = Value::Float64(0.0);
         let negative = Value::Float64(-1.0);
-        
+
         assert_eq!(compare_values(&nan, &nan), Some(Ordering::Equal));
         assert_eq!(compare_values(&nan, &zero), Some(Ordering::Greater));
         assert_eq!(compare_values(&negative, &nan), Some(Ordering::Less));
     }
-    
+
     #[test]
     fn test_compare_values_types() {
-        assert_eq!(compare_values(&Value::Int64(5), &Value::Int64(10)), Some(Ordering::Less));
-        assert_eq!(compare_values(&Value::Utf8("a".to_string()), &Value::Utf8("b".to_string())), Some(Ordering::Less));
+        assert_eq!(
+            compare_values(&Value::Int64(5), &Value::Int64(10)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Utf8("a".to_string()), &Value::Utf8("b".to_string())),
+            Some(Ordering::Less)
+        );
         assert_eq!(compare_values(&Value::Int64(5), &Value::Float64(5.0)), None);
     }
 }

@@ -49,9 +49,7 @@ impl ColumnData {
             ColumnData::Utf8(v) => {
                 ColumnData::Utf8(indices.iter().map(|&i| v[i].clone()).collect())
             }
-            ColumnData::Boolean(v) => {
-                ColumnData::Boolean(indices.iter().map(|&i| v[i]).collect())
-            }
+            ColumnData::Boolean(v) => ColumnData::Boolean(indices.iter().map(|&i| v[i]).collect()),
         }
     }
 }
@@ -178,5 +176,42 @@ mod tests {
     fn data_type_matches_variant() {
         let c = Column::from_parts(ColumnData::Utf8(vec!["a".into()]), None);
         assert_eq!(c.data_type(), DataType::Utf8);
+    }
+
+    #[test]
+    fn take_with_empty_indices_yields_empty_column() {
+        let c = int_column();
+        let taken = c.take(&[]).unwrap();
+        assert_eq!(taken.len(), 0);
+        assert!(taken.is_empty());
+    }
+
+    #[test]
+    fn take_can_repeat_and_duplicate_positions() {
+        let c = int_column();
+        let taken = c.take(&[0, 0, 0]).unwrap();
+        assert_eq!(taken.len(), 3);
+        assert_eq!(taken.get(0), Some(Value::Int64(10)));
+        assert_eq!(taken.get(2), Some(Value::Int64(10)));
+    }
+
+    #[test]
+    fn empty_column_reports_zero_length_and_no_nulls() {
+        let c: Column = Column::from_parts(ColumnData::Int64(vec![]), None);
+        assert_eq!(c.len(), 0);
+        assert!(c.is_empty());
+        assert_eq!(c.null_count(), 0);
+        assert_eq!(c.get(0), None);
+    }
+
+    #[test]
+    fn all_null_column_reports_full_null_count() {
+        let c = Column::from_parts(
+            ColumnData::Int64(vec![0, 0, 0]),
+            Some(Validity::from_flags(vec![false, false, false])),
+        );
+        assert_eq!(c.null_count(), 3);
+        assert_eq!(c.get(0), Some(Value::Null));
+        assert_eq!(c.get(2), Some(Value::Null));
     }
 }

@@ -3,13 +3,13 @@
 //! Provides eager, row-at-a-time physical operators (filter, project, sort, limit)
 //! and the execute pipeline running the entire query flow.
 
+use crate::array::builder::ColumnBuilder;
 use crate::batch::RecordBatch;
 use crate::error::{BasaltError, Result};
 use crate::expr::expr::Expr;
+use crate::plan::binder::{BoundOrderBy, BoundProjection};
 use crate::types::schema::{Field, Schema};
 use crate::types::value::Value;
-use crate::array::builder::ColumnBuilder;
-use crate::plan::binder::{BoundProjection, BoundOrderBy};
 
 pub struct DataFrame {
     batch: RecordBatch,
@@ -77,10 +77,10 @@ impl DataFrame {
     /// NULL values are ordered first (SQLite style).
     pub fn sort(self, keys: &[BoundOrderBy]) -> Result<Self> {
         let num_rows = self.batch.num_rows();
-        
+
         // Operator implementation (Stable index sorting):
-        // Rather than moving entire rows around during the sort, we initialize a vector of indices 
-        // [0..num_rows] and sort it stably based on the evaluated multi-key sorting criteria. 
+        // Rather than moving entire rows around during the sort, we initialize a vector of indices
+        // [0..num_rows] and sort it stably based on the evaluated multi-key sorting criteria.
         // We then use these indices to construct a new RecordBatch via a `take` operation.
         let mut indices: Vec<usize> = (0..num_rows).collect();
 
@@ -205,20 +205,23 @@ pub fn execute(sql: &str, input: RecordBatch) -> Result<RecordBatch> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::schema::Field;
-    use crate::types::data_type::DataType;
     use crate::array::column::{Column, ColumnData};
+    use crate::types::data_type::DataType;
+    use crate::types::schema::Field;
 
     fn sample_batch() -> RecordBatch {
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new("score", DataType::Float64, true),
-        ]).unwrap();
+        ])
+        .unwrap();
         let cols = vec![
             Column::from_parts(ColumnData::Int64(vec![1, 2, 3]), None),
             Column::from_parts(
                 ColumnData::Float64(vec![95.5, 88.0, f64::NAN]),
-                Some(crate::array::validity::Validity::from_flags(vec![true, true, true])),
+                Some(crate::array::validity::Validity::from_flags(vec![
+                    true, true, true,
+                ])),
             ),
         ];
         RecordBatch::try_new(schema, cols).unwrap()
@@ -234,7 +237,11 @@ mod tests {
     #[test]
     fn test_execute_pipeline() {
         let input = sample_batch();
-        let result = execute("SELECT id, score FROM tbl WHERE id > 1 ORDER BY score ASC LIMIT 1", input).unwrap();
+        let result = execute(
+            "SELECT id, score FROM tbl WHERE id > 1 ORDER BY score ASC LIMIT 1",
+            input,
+        )
+        .unwrap();
         assert_eq!(result.num_rows(), 1);
         assert_eq!(result.column(0).unwrap().get(0), Some(Value::Int64(2)));
     }
@@ -244,12 +251,15 @@ mod tests {
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new("score", DataType::Float64, true),
-        ]).unwrap();
+        ])
+        .unwrap();
         let cols = vec![
             Column::from_parts(ColumnData::Int64(vec![1, 1, 2, 2]), None),
             Column::from_parts(
                 ColumnData::Float64(vec![90.0, 80.0, 95.0, 85.0]),
-                Some(crate::array::validity::Validity::from_flags(vec![true, true, true, true])),
+                Some(crate::array::validity::Validity::from_flags(vec![
+                    true, true, true, true,
+                ])),
             ),
         ];
         let batch = RecordBatch::try_new(schema, cols).unwrap();
@@ -258,18 +268,26 @@ mod tests {
         // Sort by id ASC, score DESC
         let keys = vec![
             BoundOrderBy {
-                expr: Expr::Column { index: 0, data_type: DataType::Int64, nullable: false },
+                expr: Expr::Column {
+                    index: 0,
+                    data_type: DataType::Int64,
+                    nullable: false,
+                },
                 asc: true,
             },
             BoundOrderBy {
-                expr: Expr::Column { index: 1, data_type: DataType::Float64, nullable: true },
+                expr: Expr::Column {
+                    index: 1,
+                    data_type: DataType::Float64,
+                    nullable: true,
+                },
                 asc: false,
             },
         ];
 
         let sorted = df.sort(&keys).unwrap();
         let id_col = sorted.into_batch().column(0).unwrap().clone();
-        
+
         assert_eq!(id_col.get(0), Some(Value::Int64(1)));
         assert_eq!(id_col.get(2), Some(Value::Int64(2)));
     }
@@ -280,7 +298,7 @@ mod tests {
         // Limit > num_rows should just return all rows
         let limited = df.limit(10).unwrap();
         assert_eq!(limited.num_rows(), 3);
-        
+
         // Limit 0 should return empty batch
         let df2 = DataFrame::new(sample_batch());
         let empty = df2.limit(0).unwrap();

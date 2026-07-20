@@ -6,8 +6,8 @@
 
 use crate::batch::RecordBatch;
 use crate::error::{BasaltError, Result};
+use crate::expr::expr::{BinaryOp, Expr, UnaryOp};
 use crate::types::value::Value;
-use crate::expr::expr::{Expr, BinaryOp, UnaryOp};
 
 /// Evaluate an expression for a single row of a RecordBatch.
 pub fn eval(expr: &Expr, batch: &RecordBatch, row: usize) -> Result<Value> {
@@ -58,13 +58,13 @@ pub fn eval(expr: &Expr, batch: &RecordBatch, row: usize) -> Result<Value> {
                     other => Err(BasaltError::Type {
                         message: format!("cannot apply unary minus to non-numeric type {other}"),
                     }),
-                }
+                },
                 UnaryOp::Not => match val {
                     Value::Boolean(x) => Ok(Value::Boolean(!x)),
                     other => Err(BasaltError::Type {
                         message: format!("cannot apply logical NOT to non-boolean type {other}"),
                     }),
-                }
+                },
             }
         }
         Expr::Cast { expr, to } => {
@@ -212,7 +212,7 @@ fn eval_binary_non_null(op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
             (Value::Int64(a), Value::Int64(b)) => Ok(Value::Boolean(a < b)),
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Boolean(a < b)),
             (Value::Utf8(a), Value::Utf8(b)) => Ok(Value::Boolean(a < b)),
-            (Value::Boolean(a), Value::Boolean(b)) => Ok(Value::Boolean(a < b)),
+            (Value::Boolean(a), Value::Boolean(b)) => Ok(Value::Boolean(!a & b)),
             _ => unreachable!(),
         },
         BinaryOp::LtEq => match (lhs, rhs) {
@@ -226,7 +226,7 @@ fn eval_binary_non_null(op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
             (Value::Int64(a), Value::Int64(b)) => Ok(Value::Boolean(a > b)),
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Boolean(a > b)),
             (Value::Utf8(a), Value::Utf8(b)) => Ok(Value::Boolean(a > b)),
-            (Value::Boolean(a), Value::Boolean(b)) => Ok(Value::Boolean(a > b)),
+            (Value::Boolean(a), Value::Boolean(b)) => Ok(Value::Boolean(a & !b)),
             _ => unreachable!(),
         },
         BinaryOp::GtEq => match (lhs, rhs) {
@@ -244,27 +244,42 @@ fn eval_binary_non_null(op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
 mod tests {
     use super::*;
     use crate::array::column::{Column, ColumnData};
-    use crate::types::schema::{Field, Schema};
     use crate::types::data_type::DataType;
+    use crate::types::schema::{Field, Schema};
 
     fn test_batch() -> RecordBatch {
         let schema = Schema::new(vec![
             Field::new("a", DataType::Int64, true),
             Field::new("b", DataType::Boolean, true),
-        ]).unwrap();
-        
+        ])
+        .unwrap();
+
         let cols = vec![
-            Column::from_parts(ColumnData::Int64(vec![10, 20, 0]), Some(crate::array::validity::Validity::from_flags(vec![true, false, true]))),
-            Column::from_parts(ColumnData::Boolean(vec![true, false, false]), Some(crate::array::validity::Validity::from_flags(vec![true, false, true]))),
+            Column::from_parts(
+                ColumnData::Int64(vec![10, 20, 0]),
+                Some(crate::array::validity::Validity::from_flags(vec![
+                    true, false, true,
+                ])),
+            ),
+            Column::from_parts(
+                ColumnData::Boolean(vec![true, false, false]),
+                Some(crate::array::validity::Validity::from_flags(vec![
+                    true, false, true,
+                ])),
+            ),
         ];
-        
+
         RecordBatch::try_new(schema, cols).unwrap()
     }
 
     #[test]
     fn test_eval_col() {
         let batch = test_batch();
-        let col = Expr::Column { index: 0, data_type: DataType::Int64, nullable: true };
+        let col = Expr::Column {
+            index: 0,
+            data_type: DataType::Int64,
+            nullable: true,
+        };
         assert_eq!(eval(&col, &batch, 0).unwrap(), Value::Int64(10));
         assert_eq!(eval(&col, &batch, 1).unwrap(), Value::Null);
     }
@@ -272,7 +287,7 @@ mod tests {
     #[test]
     fn test_three_valued_logic_and() {
         let batch = test_batch();
-        
+
         // true AND NULL = NULL
         let and_null = Expr::Binary {
             left: Box::new(Expr::Literal(Value::Boolean(true))),
@@ -293,7 +308,7 @@ mod tests {
     #[test]
     fn test_three_valued_logic_or() {
         let batch = test_batch();
-        
+
         // false OR NULL = NULL
         let or_null = Expr::Binary {
             left: Box::new(Expr::Literal(Value::Boolean(false))),
@@ -334,32 +349,110 @@ mod tests {
     #[test]
     fn test_eval_overflow() {
         let batch = test_batch();
-        
+
         let add_overflow = Expr::Binary {
             left: Box::new(Expr::Literal(Value::Int64(i64::MAX))),
             op: BinaryOp::Add,
             right: Box::new(Expr::Literal(Value::Int64(1))),
         };
-        assert!(matches!(eval(&add_overflow, &batch, 0).unwrap_err(), BasaltError::NumericOverflow));
+        assert!(matches!(
+            eval(&add_overflow, &batch, 0).unwrap_err(),
+            BasaltError::NumericOverflow
+        ));
 
         let sub_overflow = Expr::Binary {
             left: Box::new(Expr::Literal(Value::Int64(i64::MIN))),
             op: BinaryOp::Sub,
             right: Box::new(Expr::Literal(Value::Int64(1))),
         };
-        assert!(matches!(eval(&sub_overflow, &batch, 0).unwrap_err(), BasaltError::NumericOverflow));
+        assert!(matches!(
+            eval(&sub_overflow, &batch, 0).unwrap_err(),
+            BasaltError::NumericOverflow
+        ));
 
         let mul_overflow = Expr::Binary {
             left: Box::new(Expr::Literal(Value::Int64(i64::MAX))),
             op: BinaryOp::Mul,
             right: Box::new(Expr::Literal(Value::Int64(2))),
         };
-        assert!(matches!(eval(&mul_overflow, &batch, 0).unwrap_err(), BasaltError::NumericOverflow));
+        assert!(matches!(
+            eval(&mul_overflow, &batch, 0).unwrap_err(),
+            BasaltError::NumericOverflow
+        ));
 
         let neg_overflow = Expr::Unary {
             op: UnaryOp::Neg,
             expr: Box::new(Expr::Literal(Value::Int64(i64::MIN))),
         };
-        assert!(matches!(eval(&neg_overflow, &batch, 0).unwrap_err(), BasaltError::NumericOverflow));
+        assert!(matches!(
+            eval(&neg_overflow, &batch, 0).unwrap_err(),
+            BasaltError::NumericOverflow
+        ));
+    }
+
+    #[test]
+    fn test_null_eq_null_is_null_not_true() {
+        // NULL = NULL is NULL, not true — equality of unknowns is unknown.
+        let batch = test_batch();
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Literal(Value::Null)),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(Value::Null)),
+        };
+        assert_eq!(eval(&expr, &batch, 0).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn test_nan_is_not_equal_to_itself() {
+        // IEEE-754: NaN == NaN is false. No special-casing at eval time.
+        let batch = test_batch();
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Literal(Value::Float64(f64::NAN))),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(Value::Float64(f64::NAN))),
+        };
+        assert_eq!(eval(&expr, &batch, 0).unwrap(), Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_is_null_and_is_not_null_always_return_boolean_never_null() {
+        let batch = test_batch();
+        let null_check = Expr::IsNull(Box::new(Expr::Literal(Value::Null)));
+        assert_eq!(eval(&null_check, &batch, 0).unwrap(), Value::Boolean(true));
+
+        let not_null_check = Expr::IsNotNull(Box::new(Expr::Literal(Value::Int64(1))));
+        assert_eq!(
+            eval(&not_null_check, &batch, 0).unwrap(),
+            Value::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_where_rejects_both_false_and_null() {
+        let batch = test_batch();
+        // Column "a" is [10, NULL, 0]; "a > 5" is [true, NULL, false].
+        let col_a = Expr::Column {
+            index: 0,
+            data_type: DataType::Int64,
+            nullable: true,
+        };
+        let predicate = Expr::Binary {
+            left: Box::new(col_a),
+            op: BinaryOp::Gt,
+            right: Box::new(Expr::Literal(Value::Int64(5))),
+        };
+        let matched = eval_predicate(&predicate, &batch).unwrap();
+        assert_eq!(matched, vec![0]);
+    }
+
+    #[test]
+    fn test_eval_predicate_on_zero_row_batch_matches_nothing() {
+        let schema = Schema::new(vec![Field::new("a", DataType::Int64, false)]).unwrap();
+        let empty = RecordBatch::empty(schema);
+        let predicate = Expr::Literal(Value::Boolean(true));
+        assert_eq!(
+            eval_predicate(&predicate, &empty).unwrap(),
+            Vec::<usize>::new()
+        );
     }
 }

@@ -43,7 +43,12 @@ mod tests {
 
     #[test]
     fn name_and_display_match() {
-        for dt in [DataType::Int64, DataType::Float64, DataType::Utf8, DataType::Boolean] {
+        for dt in [
+            DataType::Int64,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::Boolean,
+        ] {
             assert_eq!(dt.name(), dt.to_string());
         }
     }

@@ -5,11 +5,13 @@
 //! operator precedence and associativity without complex recursive-descent nesting.
 
 use crate::error::{BasaltError, Result};
+use crate::sql::ast::{
+    Expr, Literal, OrderByExpr, SelectItem, SelectStatement, Statement, TableRef,
+};
 use crate::sql::span::{Span, Spanned};
 use crate::sql::token::{Keyword, Token};
-use crate::sql::ast::{Statement, SelectStatement, SelectItem, TableRef, OrderByExpr, Expr, Literal};
-use crate::types::data_type::DataType;
 use crate::types::coercion::{BinaryOp, UnaryOp};
+use crate::types::data_type::DataType;
 
 /// Parser state containing tokens and offset cursor.
 pub struct Parser {
@@ -20,7 +22,10 @@ pub struct Parser {
 impl Parser {
     /// Creates a new Parser over the token stream.
     pub fn new(tokens: Vec<Spanned<Token>>) -> Self {
-        Self { tokens, position: 0 }
+        Self {
+            tokens,
+            position: 0,
+        }
     }
 
     /// Parses a single SQL statement from the token stream.
@@ -54,7 +59,10 @@ impl Parser {
     }
 
     fn peek(&self) -> &Token {
-        self.tokens.get(self.position).map(|t| &t.value).unwrap_or(&Token::Eof)
+        self.tokens
+            .get(self.position)
+            .map(|t| &t.value)
+            .unwrap_or(&Token::Eof)
     }
 
     fn advance(&mut self) -> &Spanned<Token> {
@@ -66,10 +74,13 @@ impl Parser {
     }
 
     fn current_span(&self) -> Span {
-        self.tokens.get(self.position).map(|t| t.span).unwrap_or_else(|| {
-            let last_pos = self.tokens.last().map(|t| t.span.end).unwrap_or(0);
-            Span::new(last_pos, last_pos)
-        })
+        self.tokens
+            .get(self.position)
+            .map(|t| t.span)
+            .unwrap_or_else(|| {
+                let last_pos = self.tokens.last().map(|t| t.span.end).unwrap_or(0);
+                Span::new(last_pos, last_pos)
+            })
     }
 
     fn expect(&mut self, expected: Token) -> Result<()> {
@@ -107,34 +118,32 @@ impl Parser {
     /// Parses a SQL SELECT statement and its structural query clauses.
     fn parse_select(&mut self) -> Result<SelectStatement> {
         self.expect(Token::Keyword(Keyword::Select))?;
-        
+
         let projections = self.parse_projections()?;
-        
+
         self.expect(Token::Keyword(Keyword::From))?;
-        
+
         let from = self.parse_table_ref()?;
-        
+
         let selection = if self.matches(&Token::Keyword(Keyword::Where)) {
             Some(self.parse_expr(0)?)
         } else {
             None
         };
-        
+
         let order_by = if self.matches(&Token::Keyword(Keyword::OrderBy)) {
             self.parse_order_by()?
         } else {
             Vec::new()
         };
-        
+
         let limit = if self.matches(&Token::Keyword(Keyword::Limit)) {
             let token = self.advance();
             match &token.value {
-                Token::Number(s) => {
-                    s.parse::<u64>().map(Some).map_err(|_| BasaltError::Syntax {
-                        span: token.span,
-                        message: format!("invalid limit number '{s}'"),
-                    })
-                }
+                Token::Number(s) => s.parse::<u64>().map(Some).map_err(|_| BasaltError::Syntax {
+                    span: token.span,
+                    message: format!("invalid limit number '{s}'"),
+                }),
                 other => Err(BasaltError::Syntax {
                     span: token.span,
                     message: format!("expected number for LIMIT, found {other}"),
@@ -143,7 +152,7 @@ impl Parser {
         } else {
             None
         };
-        
+
         Ok(SelectStatement {
             projections,
             from,
@@ -301,7 +310,7 @@ impl Parser {
             Token::Keyword(Keyword::True) => Ok(Expr::Literal(Literal::Boolean(true))),
             Token::Keyword(Keyword::False) => Ok(Expr::Literal(Literal::Boolean(false))),
             Token::Keyword(Keyword::Null) => Ok(Expr::Literal(Literal::Null)),
-            
+
             Token::Minus => {
                 let expr = self.parse_expr(13)?;
                 Ok(Expr::Unary {
@@ -372,7 +381,9 @@ impl Parser {
         match token {
             Token::Keyword(Keyword::Or) => Some((1, 2)),
             Token::Keyword(Keyword::And) => Some((3, 4)),
-            Token::Eq | Token::NotEq | Token::Lt | Token::LtEq | Token::Gt | Token::GtEq => Some((7, 8)),
+            Token::Eq | Token::NotEq | Token::Lt | Token::LtEq | Token::Gt | Token::GtEq => {
+                Some((7, 8))
+            }
             Token::Plus | Token::Minus => Some((9, 10)),
             Token::Star | Token::Slash | Token::Percent => Some((11, 12)),
             _ => None,
@@ -392,7 +403,7 @@ impl Parser {
                     span: token.span,
                     message: format!("unknown data type '{s}'"),
                 }),
-            }
+            },
             Token::Keyword(kw) => match kw {
                 Keyword::True | Keyword::False | Keyword::Null => Err(BasaltError::Syntax {
                     span: token.span,
@@ -407,8 +418,8 @@ impl Parser {
                         span: token.span,
                         message: format!("unknown data type keyword '{other}'"),
                     }),
-                }
-            }
+                },
+            },
             other => Err(BasaltError::Syntax {
                 span: token.span,
                 message: format!("expected data type name, found {other}"),
@@ -552,7 +563,8 @@ mod tests {
 
     #[test]
     fn test_parse_select_statement() {
-        let mut lexer = Lexer::new("SELECT a, b AS x FROM tbl WHERE c = 10 ORDER BY d DESC LIMIT 5;");
+        let mut lexer =
+            Lexer::new("SELECT a, b AS x FROM tbl WHERE c = 10 ORDER BY d DESC LIMIT 5;");
         let tokens = lexer.tokenize().unwrap();
         let mut parser = Parser::new(tokens);
         let stmt = parser.parse_statement().unwrap();
@@ -598,5 +610,68 @@ mod tests {
         let tokens = lexer.tokenize().unwrap();
         let mut parser = Parser::new(tokens);
         assert!(parser.parse_statement().is_err());
+    }
+
+    #[test]
+    fn test_parse_unmatched_paren_errors() {
+        let mut lexer = Lexer::new("SELECT (a FROM tbl");
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        assert!(parser.parse_statement().is_err());
+    }
+
+    #[test]
+    fn test_parse_trailing_comma_in_projections_errors() {
+        let mut lexer = Lexer::new("SELECT a, FROM tbl");
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        assert!(parser.parse_statement().is_err());
+    }
+
+    #[test]
+    fn test_parse_empty_input_errors() {
+        let mut lexer = Lexer::new("");
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        assert!(parser.parse_statement().is_err());
+    }
+
+    #[test]
+    fn test_parse_nested_parens_preserve_precedence() {
+        let expr = parse_expr_str("(a + b) * c");
+        assert_eq!(
+            expr,
+            Expr::Binary {
+                left: Box::new(Expr::Nested(Box::new(Expr::Binary {
+                    left: Box::new(Expr::Identifier("a".to_string())),
+                    op: BinaryOp::Add,
+                    right: Box::new(Expr::Identifier("b".to_string())),
+                }))),
+                op: BinaryOp::Mul,
+                right: Box::new(Expr::Identifier("c".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_unary_minus_binds_tighter_than_binary_plus() {
+        let expr = parse_expr_str("-a + b");
+        assert_eq!(
+            expr,
+            Expr::Binary {
+                left: Box::new(Expr::Unary {
+                    op: UnaryOp::Neg,
+                    expr: Box::new(Expr::Identifier("a".to_string())),
+                }),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Identifier("b".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_string_literal_with_escaped_quote() {
+        let expr = parse_expr_str("'it''s'");
+        assert_eq!(expr, Expr::Literal(Literal::String("it's".to_string())));
     }
 }

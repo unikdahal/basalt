@@ -4,8 +4,8 @@
 //! They are "unbound" because table and column references are still named strings
 //! rather than checked catalog offsets, and expressions are not yet type-checked.
 
-use crate::types::data_type::DataType;
 use crate::types::coercion::{BinaryOp, UnaryOp};
+use crate::types::data_type::DataType;
 
 /// Statements supported by the parser.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,10 +36,7 @@ pub enum SelectItem {
     /// Wildcard select (`*`).
     Wildcard,
     /// Projection expression with optional column alias (e.g. `c AS alias`).
-    Expr {
-        expr: Expr,
-        alias: Option<String>,
-    },
+    Expr { expr: Expr, alias: Option<String> },
 }
 
 /// A reference to a source table.
@@ -74,20 +71,11 @@ pub enum Expr {
         right: Box<Expr>,
     },
     /// Unary operations.
-    Unary {
-        op: UnaryOp,
-        expr: Box<Expr>,
-    },
+    Unary { op: UnaryOp, expr: Box<Expr> },
     /// SQL Cast expression.
-    Cast {
-        expr: Box<Expr>,
-        to: DataType,
-    },
+    Cast { expr: Box<Expr>, to: DataType },
     /// Postfix `IS NULL` or `IS NOT NULL` check.
-    IsNull {
-        expr: Box<Expr>,
-        negated: bool,
-    },
+    IsNull { expr: Box<Expr>, negated: bool },
     /// Parenthesized subexpression mapping to keep parsing precedence order.
     Nested(Box<Expr>),
 }

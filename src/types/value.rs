@@ -44,25 +44,36 @@ impl Value {
             (Value::Float64(v), DataType::Utf8) => Ok(Value::Utf8(v.to_string())),
 
             (Value::Utf8(v), DataType::Utf8) => Ok(Value::Utf8(v.clone())),
-            (Value::Utf8(v), DataType::Int64) => v.parse::<i64>().map(Value::Int64).map_err(|_| {
-                BasaltError::Type { message: format!("cannot cast '{v}' to Int64") }
-            }),
+            (Value::Utf8(v), DataType::Int64) => {
+                v.parse::<i64>()
+                    .map(Value::Int64)
+                    .map_err(|_| BasaltError::Type {
+                        message: format!("cannot cast '{v}' to Int64"),
+                    })
+            }
             (Value::Utf8(v), DataType::Float64) => {
-                v.parse::<f64>().map(Value::Float64).map_err(|_| BasaltError::Type {
-                    message: format!("cannot cast '{v}' to Float64"),
-                })
+                v.parse::<f64>()
+                    .map(Value::Float64)
+                    .map_err(|_| BasaltError::Type {
+                        message: format!("cannot cast '{v}' to Float64"),
+                    })
             }
             (Value::Utf8(v), DataType::Boolean) => match v.to_ascii_lowercase().as_str() {
                 "true" => Ok(Value::Boolean(true)),
                 "false" => Ok(Value::Boolean(false)),
-                _ => Err(BasaltError::Type { message: format!("cannot cast '{v}' to Boolean") }),
+                _ => Err(BasaltError::Type {
+                    message: format!("cannot cast '{v}' to Boolean"),
+                }),
             },
 
             (Value::Boolean(v), DataType::Boolean) => Ok(Value::Boolean(*v)),
             (Value::Boolean(v), DataType::Utf8) => Ok(Value::Utf8(v.to_string())),
 
             (other, target) => Err(BasaltError::Type {
-                message: format!("cannot cast {} to {target}", other.data_type().unwrap().name()),
+                message: format!(
+                    "cannot cast {} to {target}",
+                    other.data_type().map_or("Null", |d| d.name())
+                ),
             }),
         }
     }
@@ -104,23 +115,72 @@ mod tests {
     }
 
     #[test]
+    fn cast_i64_min_and_max_to_utf8_round_trip_through_parse() {
+        assert_eq!(
+            Value::Int64(i64::MAX).cast_to(DataType::Utf8).unwrap(),
+            Value::Utf8(i64::MAX.to_string())
+        );
+        assert_eq!(
+            Value::Utf8(i64::MIN.to_string())
+                .cast_to(DataType::Int64)
+                .unwrap(),
+            Value::Int64(i64::MIN)
+        );
+    }
+
+    #[test]
+    fn cast_non_ascii_string_to_int_errors_instead_of_panicking() {
+        let err = Value::Utf8("héllo".into())
+            .cast_to(DataType::Int64)
+            .unwrap_err();
+        assert!(matches!(err, BasaltError::Type { .. }));
+    }
+
+    #[test]
+    fn cast_empty_string_to_int_errors() {
+        assert!(Value::Utf8(String::new()).cast_to(DataType::Int64).is_err());
+    }
+
+    #[test]
     fn cast_int_to_float() {
-        assert_eq!(Value::Int64(3).cast_to(DataType::Float64).unwrap(), Value::Float64(3.0));
+        assert_eq!(
+            Value::Int64(3).cast_to(DataType::Float64).unwrap(),
+            Value::Float64(3.0)
+        );
     }
 
     #[test]
     fn cast_string_to_int_ok_and_err() {
-        assert_eq!(Value::Utf8("42".into()).cast_to(DataType::Int64).unwrap(), Value::Int64(42));
+        assert_eq!(
+            Value::Utf8("42".into()).cast_to(DataType::Int64).unwrap(),
+            Value::Int64(42)
+        );
         assert!(Value::Utf8("nope".into()).cast_to(DataType::Int64).is_err());
     }
 
     #[test]
     fn cast_string_to_bool() {
         assert_eq!(
-            Value::Utf8("true".into()).cast_to(DataType::Boolean).unwrap(),
+            Value::Utf8("true".into())
+                .cast_to(DataType::Boolean)
+                .unwrap(),
             Value::Boolean(true)
         );
-        assert!(Value::Utf8("nah".into()).cast_to(DataType::Boolean).is_err());
+        assert!(Value::Utf8("nah".into())
+            .cast_to(DataType::Boolean)
+            .is_err());
+    }
+
+    /// Regression test for the unsupported-cast fallback arm: it must format
+    /// the error message from the source value's type without panicking (a
+    /// prior version reached this via `.data_type().unwrap()`, which happened
+    /// to be safe only because nulls short-circuit earlier, but was still an
+    /// unwrap in library code masking that guarantee).
+    #[test]
+    fn cast_unsupported_combination_reports_source_type_without_panicking() {
+        let err = Value::Float64(1.5).cast_to(DataType::Boolean).unwrap_err();
+        assert!(matches!(err, BasaltError::Type { .. }));
+        assert!(err.to_string().contains("Float64"));
     }
 
     #[test]

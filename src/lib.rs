@@ -6,13 +6,13 @@
 
 pub mod error;
 
-pub mod types;
 pub mod array;
 pub mod batch;
-pub mod io;
-pub mod expr;
-pub mod sql;
-pub mod plan;
 pub mod exec;
+pub mod expr;
+pub mod io;
+pub mod plan;
+pub mod sql;
+pub mod types;
 
 pub use error::{BasaltError, Result};

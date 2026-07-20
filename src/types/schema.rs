@@ -12,7 +12,11 @@ pub struct Field {
 
 impl Field {
     pub fn new(name: impl Into<String>, data_type: DataType, nullable: bool) -> Self {
-        Field { name: name.into(), data_type, nullable }
+        Field {
+            name: name.into(),
+            data_type,
+            nullable,
+        }
     }
 }
 
@@ -24,13 +28,13 @@ pub struct Schema {
 impl Schema {
     /// Errors on duplicate names.
     pub fn new(fields: Vec<Field>) -> Result<Self> {
-        for i in 0..fields.len() {
-            for j in (i + 1)..fields.len() {
-                if fields[i].name == fields[j].name {
-                    return Err(BasaltError::Schema {
-                        message: format!("duplicate field name '{}'", fields[i].name),
-                    });
-                }
+        use std::collections::HashSet;
+        let mut seen = HashSet::with_capacity(fields.len());
+        for field in &fields {
+            if !seen.insert(&field.name) {
+                return Err(BasaltError::Schema {
+                    message: format!("duplicate field name '{}'", field.name),
+                });
             }
         }
         Ok(Schema { fields })

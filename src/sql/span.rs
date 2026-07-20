@@ -26,7 +26,10 @@ impl Span {
     /// Creates an empty (zero-width) span at a specific position.
     /// This is useful for representing insertions or zero-width elements.
     pub const fn empty(pos: usize) -> Self {
-        Self { start: pos, end: pos }
+        Self {
+            start: pos,
+            end: pos,
+        }
     }
 
     /// Merges two spans to cover the range from the start of the earliest
@@ -104,7 +107,7 @@ mod tests {
         let s2 = Span::new(12, 15);
         assert_eq!(s1.merge(s2), Span::new(5, 15));
         assert_eq!(s2.merge(s1), Span::new(5, 15));
-        
+
         let s3 = Span::new(8, 11);
         assert_eq!(s1.merge(s3), Span::new(5, 11));
     }
@@ -122,7 +125,7 @@ mod tests {
         let mut s = Spanned::new("hello".to_string(), Span::new(0, 5));
         assert_eq!(s.len(), 5);
         assert_eq!(*s, "hello");
-        
+
         s.push_str(" world");
         assert_eq!(*s, "hello world");
     }

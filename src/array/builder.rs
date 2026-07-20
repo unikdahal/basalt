@@ -24,7 +24,11 @@ impl ColumnBuilder {
             DataType::Utf8 => ColumnData::Utf8(Vec::with_capacity(capacity)),
             DataType::Boolean => ColumnData::Boolean(Vec::with_capacity(capacity)),
         };
-        ColumnBuilder { data, validity: Vec::with_capacity(capacity), null_count: 0 }
+        ColumnBuilder {
+            data,
+            validity: Vec::with_capacity(capacity),
+            null_count: 0,
+        }
     }
 
     pub fn data_type(&self) -> DataType {
@@ -82,8 +86,11 @@ impl ColumnBuilder {
 
     /// Consumes the builder. Drops validity entirely if null_count == 0.
     pub fn finish(self) -> Column {
-        let validity =
-            if self.null_count == 0 { None } else { Some(Validity::from_flags(self.validity)) };
+        let validity = if self.null_count == 0 {
+            None
+        } else {
+            Some(Validity::from_flags(self.validity))
+        };
         Column::from_parts(self.data, validity)
     }
 }

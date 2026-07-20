@@ -10,12 +10,18 @@ pub struct Validity {
 
 impl Validity {
     pub fn new_all_valid(len: usize) -> Self {
-        Validity { is_valid: vec![true; len], null_count: 0 }
+        Validity {
+            is_valid: vec![true; len],
+            null_count: 0,
+        }
     }
 
     pub fn from_flags(is_valid: Vec<bool>) -> Self {
         let null_count = is_valid.iter().filter(|v| !**v).count();
-        Validity { is_valid, null_count }
+        Validity {
+            is_valid,
+            null_count,
+        }
     }
 
     pub fn is_valid(&self, index: usize) -> bool {

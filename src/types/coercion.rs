@@ -35,7 +35,11 @@ pub struct CoercionPlan {
 }
 
 fn no_cast(output: DataType) -> CoercionPlan {
-    CoercionPlan { lhs_cast: None, rhs_cast: None, output }
+    CoercionPlan {
+        lhs_cast: None,
+        rhs_cast: None,
+        output,
+    }
 }
 
 pub fn coerce_binary(op: BinaryOp, lhs: DataType, rhs: DataType) -> Result<CoercionPlan> {
@@ -49,22 +53,30 @@ pub fn coerce_binary(op: BinaryOp, lhs: DataType, rhs: DataType) -> Result<Coerc
     match op {
         Add | Sub | Mul | Div | Mod => match (lhs, rhs) {
             (Int64, Int64) => Ok(no_cast(Int64)),
-            (Int64, Float64) => {
-                Ok(CoercionPlan { lhs_cast: Some(Float64), rhs_cast: None, output: Float64 })
-            }
-            (Float64, Int64) => {
-                Ok(CoercionPlan { lhs_cast: None, rhs_cast: Some(Float64), output: Float64 })
-            }
+            (Int64, Float64) => Ok(CoercionPlan {
+                lhs_cast: Some(Float64),
+                rhs_cast: None,
+                output: Float64,
+            }),
+            (Float64, Int64) => Ok(CoercionPlan {
+                lhs_cast: None,
+                rhs_cast: Some(Float64),
+                output: Float64,
+            }),
             (Float64, Float64) => Ok(no_cast(Float64)),
             _ => Err(type_err(op, lhs, rhs)),
         },
         Eq | NotEq | Lt | LtEq | Gt | GtEq => match (lhs, rhs) {
-            (Int64, Float64) => {
-                Ok(CoercionPlan { lhs_cast: Some(Float64), rhs_cast: None, output: Boolean })
-            }
-            (Float64, Int64) => {
-                Ok(CoercionPlan { lhs_cast: None, rhs_cast: Some(Float64), output: Boolean })
-            }
+            (Int64, Float64) => Ok(CoercionPlan {
+                lhs_cast: Some(Float64),
+                rhs_cast: None,
+                output: Boolean,
+            }),
+            (Float64, Int64) => Ok(CoercionPlan {
+                lhs_cast: None,
+                rhs_cast: Some(Float64),
+                output: Boolean,
+            }),
             (a, b) if a == b => Ok(no_cast(Boolean)),
             _ => Err(type_err(op, lhs, rhs)),
         },

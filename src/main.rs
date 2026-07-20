@@ -4,10 +4,10 @@
 //! Tables referenced in the query's FROM clause are dynamically loaded
 //! from matching CSV files in the working directory and formatted as ASCII tables.
 
+use basalt::exec::dataframe::execute;
+use basalt::io::csv::{CsvReadOptions, CsvReader};
 use std::io::{self, Write};
 use std::path::Path;
-use basalt::io::csv::{CsvReader, CsvReadOptions};
-use basalt::exec::dataframe::execute;
 
 fn main() {
     println!("============================================================");
@@ -61,7 +61,7 @@ fn handle_query(sql: &str) -> basalt::Result<()> {
     let mut lexer = basalt::sql::lexer::Lexer::new(sql);
     let tokens = lexer.tokenize()?;
     let mut parser = basalt::sql::parser::Parser::new(tokens);
-    
+
     let stmt = parser.parse_statement()?;
     let table_name = match &stmt {
         basalt::sql::ast::Statement::Select(select) => &select.from.name,
@@ -92,7 +92,7 @@ fn handle_query(sql: &str) -> basalt::Result<()> {
 
     // 5. Display the result
     // REPL table output formatting: The RecordBatch implements Display, internally calculating
-    // the max width for each column to neatly align the data in a tabular layout 
+    // the max width for each column to neatly align the data in a tabular layout
     // suitable for terminal consumption.
     println!("{result}");
     println!("(Returned {} rows in {:?})", result.num_rows(), elapsed);

@@ -33,7 +33,7 @@ pub enum Keyword {
 
 impl Keyword {
     /// Tries to parse a case-insensitive string slice into a `Keyword`.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn lookup(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "select" => Some(Keyword::Select),
             "from" => Some(Keyword::From),

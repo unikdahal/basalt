@@ -4,13 +4,13 @@
 //! column types and nullability using a two-pass lattice resolution:
 //! `Boolean` -> `Int64` -> `Float64` -> `Utf8`.
 
-use std::path::Path;
 use crate::array::builder::ColumnBuilder;
 use crate::batch::RecordBatch;
 use crate::error::{BasaltError, Result};
 use crate::types::data_type::DataType;
 use crate::types::schema::{Field, Schema};
 use crate::types::value::Value;
+use std::path::Path;
 
 /// Custom options for configuring CSV ingestion.
 pub struct CsvReadOptions {
@@ -83,7 +83,10 @@ impl CsvReader {
         let mut has_null = vec![false; num_cols];
         let mut non_null_count = vec![0; num_cols];
 
-        let infer_limit = options.infer_rows.unwrap_or(data_records.len()).min(data_records.len());
+        let infer_limit = options
+            .infer_rows
+            .unwrap_or(data_records.len())
+            .min(data_records.len());
 
         for (r, row) in data_records.iter().enumerate() {
             let line_num = r + 1 + if has_header { 1 } else { 0 };
@@ -99,7 +102,7 @@ impl CsvReader {
             let narrow_types = r < infer_limit;
             for c in 0..num_cols {
                 let val = &row[c];
-                if val == &options.null_literal || val.is_empty() {
+                if val == &options.null_literal {
                     has_null[c] = true;
                 } else if narrow_types {
                     non_null_count[c] += 1;
@@ -150,7 +153,10 @@ impl CsvReader {
         let schema = Schema::new(fields)?;
 
         // Pass 2: Ingest all values through typed builders
-        let mut builders = col_types.iter().map(|&t| ColumnBuilder::new(t)).collect::<Vec<_>>();
+        let mut builders = col_types
+            .iter()
+            .map(|&t| ColumnBuilder::new(t))
+            .collect::<Vec<_>>();
 
         for (r, row) in data_records.iter().enumerate() {
             let line_num = r + 1 + if has_header { 1 } else { 0 };
@@ -165,7 +171,7 @@ impl CsvReader {
             }
             for c in 0..num_cols {
                 let val = &row[c];
-                if val == &options.null_literal || val.is_empty() {
+                if val == &options.null_literal {
                     builders[c].append_null();
                 } else {
                     let parsed_val = match col_types[c] {
@@ -304,8 +310,10 @@ mod tests {
     #[test]
     fn test_csv_sampling_inference() {
         let csv = "val\n1\n2\n3.5";
-        let mut options = CsvReadOptions::default();
-        options.infer_rows = Some(2);
+        let options = CsvReadOptions {
+            infer_rows: Some(2),
+            ..CsvReadOptions::default()
+        };
 
         let err = CsvReader::read_str(csv, &options);
         assert!(err.is_err());
@@ -323,18 +331,122 @@ mod tests {
     #[test]
     fn test_csv_nullability_inference_out_of_sample() {
         let csv = "val\n1\n2\n\n";
-        let mut options = CsvReadOptions::default();
-        options.infer_rows = Some(2);
+        let options = CsvReadOptions {
+            infer_rows: Some(2),
+            ..CsvReadOptions::default()
+        };
 
         let batch = CsvReader::read_str(csv, &options).unwrap();
         assert_eq!(batch.num_rows(), 3);
-        
+
         let schema = batch.schema();
         assert_eq!(schema.field(0).unwrap().data_type, DataType::Int64);
         assert!(schema.field(0).unwrap().nullable);
-        
+
         assert_eq!(batch.column(0).unwrap().get(0), Some(Value::Int64(1)));
         assert_eq!(batch.column(0).unwrap().get(1), Some(Value::Int64(2)));
         assert_eq!(batch.column(0).unwrap().get(2), Some(Value::Null));
+    }
+
+    /// Regression test: a configured `null_literal` other than `""` must be the
+    /// only thing that marks a field null — an empty string is then just an
+    /// empty `Utf8` value, not `NULL`. A prior version hardcoded `|| val.is_empty()`
+    /// alongside the configured literal, which silently nulled out real empty-string
+    /// data whenever a non-default null literal was configured.
+    #[test]
+    fn test_csv_custom_null_literal_does_not_null_empty_strings() {
+        let csv = "id,tag\n1,NA\n2,\n3,x";
+        let options = CsvReadOptions {
+            null_literal: "NA".to_string(),
+            ..CsvReadOptions::default()
+        };
+        let batch = CsvReader::read_str(csv, &options).unwrap();
+
+        assert_eq!(batch.column(1).unwrap().get(0), Some(Value::Null));
+        assert_eq!(
+            batch.column(1).unwrap().get(1),
+            Some(Value::Utf8(String::new()))
+        );
+        assert_eq!(
+            batch.column(1).unwrap().get(2),
+            Some(Value::Utf8("x".to_string()))
+        );
+    }
+
+    /// The default null literal is still `""`, so empty fields remain null
+    /// when the caller doesn't override it.
+    #[test]
+    fn test_csv_default_null_literal_is_empty_string() {
+        let csv = "id,tag\n1,\n2,x";
+        let batch = CsvReader::read_str(csv, &CsvReadOptions::default()).unwrap();
+        assert_eq!(batch.column(1).unwrap().get(0), Some(Value::Null));
+        assert_eq!(
+            batch.column(1).unwrap().get(1),
+            Some(Value::Utf8("x".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_csv_quoted_field_containing_delimiter_is_not_split() {
+        let csv = "id,name\n1,\"Doe, Jane\"\n2,Smith";
+        let batch = CsvReader::read_str(csv, &CsvReadOptions::default()).unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(
+            batch.column(1).unwrap().get(0),
+            Some(Value::Utf8("Doe, Jane".to_string()))
+        );
+        assert_eq!(
+            batch.column(1).unwrap().get(1),
+            Some(Value::Utf8("Smith".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_csv_all_null_column_defaults_to_nullable_utf8() {
+        // No non-null evidence at all: the type lattice has nothing to resolve
+        // to, so the column must fall back to Utf8 and be marked nullable.
+        let csv = "id,tag\n1,\n2,\n3,";
+        let batch = CsvReader::read_str(csv, &CsvReadOptions::default()).unwrap();
+        let field = batch.schema().field(1).unwrap();
+        assert_eq!(field.data_type, DataType::Utf8);
+        assert!(field.nullable);
+        assert_eq!(batch.column(1).unwrap().null_count(), 3);
+    }
+
+    #[test]
+    fn test_csv_crlf_line_endings_are_stripped() {
+        let csv = "id,name\r\n1,Alice\r\n2,Bob\r\n";
+        let batch = CsvReader::read_str(csv, &CsvReadOptions::default()).unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(
+            batch.column(1).unwrap().get(0),
+            Some(Value::Utf8("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_csv_no_trailing_newline_still_reads_last_row() {
+        let csv = "id,name\n1,Alice\n2,Bob";
+        let batch = CsvReader::read_str(csv, &CsvReadOptions::default()).unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(
+            batch.column(1).unwrap().get(1),
+            Some(Value::Utf8("Bob".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_csv_custom_delimiter() {
+        let csv = "id;name\n1;Alice\n2;Bob";
+        let options = CsvReadOptions {
+            delimiter: b';',
+            ..CsvReadOptions::default()
+        };
+        let batch = CsvReader::read_str(csv, &options).unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(
+            batch.column(1).unwrap().get(0),
+            Some(Value::Utf8("Alice".to_string()))
+        );
     }
 }

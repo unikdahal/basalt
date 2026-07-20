@@ -29,7 +29,7 @@ impl RecordBatch {
             });
         }
         let num_rows = columns.first().map_or(0, Column::len);
-        for (i, col) in columns.iter().enumerate() {
+        for (i, (col, field)) in columns.iter().zip(schema.fields()).enumerate() {
             if col.len() != num_rows {
                 return Err(BasaltError::Schema {
                     message: format!(
@@ -38,7 +38,7 @@ impl RecordBatch {
                     ),
                 });
             }
-            let field_type = schema.field(i).unwrap().data_type;
+            let field_type = field.data_type;
             if col.data_type() != field_type {
                 return Err(BasaltError::Schema {
                     message: format!(
@@ -49,18 +49,24 @@ impl RecordBatch {
                 });
             }
         }
-        Ok(RecordBatch { schema, columns, num_rows })
+        Ok(RecordBatch {
+            schema,
+            columns,
+            num_rows,
+        })
     }
 
     pub fn empty(schema: Schema) -> Self {
         let columns = schema
             .fields()
             .iter()
-            .map(|f| {
-                crate::array::builder::ColumnBuilder::new(f.data_type).finish()
-            })
+            .map(|f| crate::array::builder::ColumnBuilder::new(f.data_type).finish())
             .collect();
-        RecordBatch { schema, columns, num_rows: 0 }
+        RecordBatch {
+            schema,
+            columns,
+            num_rows: 0,
+        }
     }
 
     pub fn schema(&self) -> &Schema {
@@ -85,16 +91,28 @@ impl RecordBatch {
 
     /// Row-position selection — the primitive under filter and sort.
     pub fn take(&self, indices: &[usize]) -> Result<RecordBatch> {
-        let columns =
-            self.columns.iter().map(|c| c.take(indices)).collect::<Result<Vec<_>>>()?;
+        let columns = self
+            .columns
+            .iter()
+            .map(|c| c.take(indices))
+            .collect::<Result<Vec<_>>>()?;
         let num_rows = indices.len();
-        Ok(RecordBatch { schema: self.schema.clone(), columns, num_rows })
+        Ok(RecordBatch {
+            schema: self.schema.clone(),
+            columns,
+            num_rows,
+        })
     }
 }
 
 impl std::fmt::Display for RecordBatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let headers: Vec<String> = self.schema.fields().iter().map(|fld| fld.name.clone()).collect();
+        let headers: Vec<String> = self
+            .schema
+            .fields()
+            .iter()
+            .map(|fld| fld.name.clone())
+            .collect();
         let mut rows: Vec<Vec<String>> = Vec::with_capacity(self.num_rows);
         for r in 0..self.num_rows {
             let mut row = Vec::with_capacity(self.num_columns());
@@ -211,5 +229,37 @@ mod tests {
         assert!(rendered.contains('b'));
         assert!(rendered.contains('1'));
         assert!(rendered.contains('x'));
+    }
+
+    #[test]
+    fn take_with_no_indices_yields_zero_row_batch_with_same_schema() {
+        let b = batch();
+        let taken = b.take(&[]).unwrap();
+        assert_eq!(taken.num_rows(), 0);
+        assert_eq!(taken.schema(), b.schema());
+    }
+
+    #[test]
+    fn no_column_schema_gives_zero_rows_explicitly() {
+        // A schema with zero fields has no columns to derive num_rows from,
+        // so RecordBatch must store it explicitly rather than infer it — see B2/B3.
+        let schema = Schema::new(vec![]).unwrap();
+        let b = RecordBatch::try_new(schema, vec![]).unwrap();
+        assert_eq!(b.num_rows(), 0);
+        assert_eq!(b.num_columns(), 0);
+    }
+
+    #[test]
+    fn display_renders_header_only_for_zero_row_batch() {
+        let b = RecordBatch::empty(schema());
+        let rendered = b.to_string();
+        assert!(rendered.contains('a'));
+        assert!(rendered.contains('b'));
+    }
+
+    #[test]
+    fn column_returns_none_out_of_bounds() {
+        let b = batch();
+        assert!(b.column(99).is_none());
     }
 }

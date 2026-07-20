@@ -6,8 +6,8 @@
 //! case combinations like `ORDER BY` and character escaping in single-quoted strings.
 
 use crate::error::{BasaltError, Result};
-use crate::sql::token::{Keyword, Token};
 use crate::sql::span::{Span, Spanned};
+use crate::sql::token::{Keyword, Token};
 
 /// Lexer state tracking indices and slice references.
 pub struct Lexer<'a> {
@@ -20,7 +20,11 @@ impl<'a> Lexer<'a> {
     /// Creates a new SQL Lexer over the query text.
     pub fn new(input: &'a str) -> Self {
         let chars = input.char_indices().collect();
-        Self { input, chars, position: 0 }
+        Self {
+            input,
+            chars,
+            position: 0,
+        }
     }
 
     /// Scans the entire source string and produces a list of spanned tokens.
@@ -69,7 +73,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn current_pos(&self) -> usize {
-        self.chars.get(self.position).map(|&(idx, _)| idx).unwrap_or(self.input.len())
+        self.chars
+            .get(self.position)
+            .map(|&(idx, _)| idx)
+            .unwrap_or(self.input.len())
     }
 
     /// Skips whitespace and single-line SQL comments starting with `--`.
@@ -182,7 +189,7 @@ impl<'a> Lexer<'a> {
         // Special case: check if it is "ORDER" followed by "BY".
         // Combines them into a single Token::Keyword(Keyword::OrderBy)
         // to simplify parsing logic.
-        if name.to_ascii_lowercase() == "order" {
+        if name.eq_ignore_ascii_case("order") {
             let saved_pos = self.position;
             self.skip_whitespace();
             let mut next_word = String::new();
@@ -195,7 +202,7 @@ impl<'a> Lexer<'a> {
                 }
             }
 
-            if next_word.to_ascii_lowercase() == "by" {
+            if next_word.eq_ignore_ascii_case("by") {
                 return Ok(Token::Keyword(Keyword::OrderBy));
             } else {
                 // Rollback position if it was just a column named 'order'
@@ -203,7 +210,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        if let Some(kw) = Keyword::from_str(&name) {
+        if let Some(kw) = Keyword::lookup(&name) {
             Ok(Token::Keyword(kw))
         } else {
             Ok(Token::Identifier(name))
@@ -226,8 +233,10 @@ impl<'a> Lexer<'a> {
         }
 
         // Scan decimal fractional digits
-        if self.peek() == Some('.') && self.peek_next().map_or(false, |c| c.is_ascii_digit()) {
-            value.push(self.advance().unwrap()); // push '.'
+        if self.peek() == Some('.') && self.peek_next().is_some_and(|c| c.is_ascii_digit()) {
+            if let Some(dot) = self.advance() {
+                value.push(dot); // push '.'
+            }
             while let Some(c) = self.peek() {
                 if c.is_ascii_digit() {
                     value.push(c);
@@ -241,10 +250,14 @@ impl<'a> Lexer<'a> {
         // Scan exponent suffix
         if let Some(c) = self.peek() {
             if c == 'e' || c == 'E' {
-                value.push(self.advance().unwrap());
+                if let Some(e) = self.advance() {
+                    value.push(e);
+                }
                 if let Some(sign) = self.peek() {
                     if sign == '+' || sign == '-' {
-                        value.push(self.advance().unwrap());
+                        if let Some(s) = self.advance() {
+                            value.push(s);
+                        }
                     }
                 }
                 while let Some(exp_c) = self.peek() {
@@ -370,5 +383,49 @@ mod tests {
             }
             _ => panic!("Expected syntax error for invalid character"),
         }
+    }
+
+    #[test]
+    fn test_lex_empty_input_yields_only_eof() {
+        let mut lexer = Lexer::new("");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].value, Token::Eof);
+    }
+
+    #[test]
+    fn test_lex_whitespace_only_input_yields_only_eof() {
+        let mut lexer = Lexer::new("   \n\t  ");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].value, Token::Eof);
+    }
+
+    #[test]
+    fn test_lex_non_ascii_character_is_rejected() {
+        // Identifiers are ASCII-alphanumeric-or-underscore only; a bare
+        // non-ASCII character isn't a valid start of any token.
+        let mut lexer = Lexer::new("é");
+        let err = lexer.tokenize().unwrap_err();
+        assert!(matches!(err, BasaltError::Syntax { .. }));
+    }
+
+    #[test]
+    fn test_lex_order_as_a_plain_column_name_is_not_swallowed_as_keyword() {
+        // "order" not followed by "by" must roll back to being an identifier.
+        let mut lexer = Lexer::new("SELECT order FROM tbl");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens[1].value, Token::Identifier("order".to_string()));
+    }
+
+    #[test]
+    fn test_lex_maximal_munch_lt_vs_lte_vs_ne() {
+        let mut lexer = Lexer::new("< <= <> = !=");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens[0].value, Token::Lt);
+        assert_eq!(tokens[1].value, Token::LtEq);
+        assert_eq!(tokens[2].value, Token::NotEq);
+        assert_eq!(tokens[3].value, Token::Eq);
+        assert_eq!(tokens[4].value, Token::NotEq);
     }
 }
