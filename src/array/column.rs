@@ -33,23 +33,38 @@ impl ColumnData {
         }
     }
 
-    fn value_at(&self, index: usize) -> Value {
+    fn value_at(&self, index: usize) -> Option<Value> {
         match self {
-            ColumnData::Int64(v) => Value::Int64(v[index]),
-            ColumnData::Float64(v) => Value::Float64(v[index]),
-            ColumnData::Utf8(v) => Value::Utf8(v[index].clone()),
-            ColumnData::Boolean(v) => Value::Boolean(v[index]),
+            ColumnData::Int64(v) => v.get(index).map(|&x| Value::Int64(x)),
+            ColumnData::Float64(v) => v.get(index).map(|&x| Value::Float64(x)),
+            ColumnData::Utf8(v) => v.get(index).map(|x| Value::Utf8(x.clone())),
+            ColumnData::Boolean(v) => v.get(index).map(|&x| Value::Boolean(x)),
         }
     }
 
-    fn take(&self, indices: &[usize]) -> ColumnData {
+    /// `None` if any index is out of bounds for the underlying storage.
+    fn take(&self, indices: &[usize]) -> Option<ColumnData> {
         match self {
-            ColumnData::Int64(v) => ColumnData::Int64(indices.iter().map(|&i| v[i]).collect()),
-            ColumnData::Float64(v) => ColumnData::Float64(indices.iter().map(|&i| v[i]).collect()),
-            ColumnData::Utf8(v) => {
-                ColumnData::Utf8(indices.iter().map(|&i| v[i].clone()).collect())
-            }
-            ColumnData::Boolean(v) => ColumnData::Boolean(indices.iter().map(|&i| v[i]).collect()),
+            ColumnData::Int64(v) => indices
+                .iter()
+                .map(|&i| v.get(i).copied())
+                .collect::<Option<Vec<_>>>()
+                .map(ColumnData::Int64),
+            ColumnData::Float64(v) => indices
+                .iter()
+                .map(|&i| v.get(i).copied())
+                .collect::<Option<Vec<_>>>()
+                .map(ColumnData::Float64),
+            ColumnData::Utf8(v) => indices
+                .iter()
+                .map(|&i| v.get(i).cloned())
+                .collect::<Option<Vec<_>>>()
+                .map(ColumnData::Utf8),
+            ColumnData::Boolean(v) => indices
+                .iter()
+                .map(|&i| v.get(i).copied())
+                .collect::<Option<Vec<_>>>()
+                .map(ColumnData::Boolean),
         }
     }
 }
@@ -104,21 +119,18 @@ impl Column {
         if self.is_null(index) {
             return Some(Value::Null);
         }
-        Some(self.data.value_at(index))
+        self.data.value_at(index)
     }
 
     /// Produce a new Column containing only the given row positions, in order.
     /// Used by filter (selection vector) and sort (permutation).
     pub fn take(&self, indices: &[usize]) -> Result<Column> {
-        for &i in indices {
-            if i >= self.len() {
-                return Err(BasaltError::Internal(format!(
-                    "take index {i} out of bounds for column of length {}",
-                    self.len()
-                )));
-            }
-        }
-        let data = self.data.take(indices);
+        let data = self.data.take(indices).ok_or_else(|| {
+            BasaltError::Internal(format!(
+                "take index out of bounds for column of length {}",
+                self.len()
+            ))
+        })?;
         let validity = self.validity.as_ref().map(|v| v.take(indices));
         Ok(Column::from_parts(data, validity))
     }

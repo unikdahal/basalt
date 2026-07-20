@@ -40,7 +40,18 @@ impl Value {
             (Value::Int64(v), DataType::Boolean) => Ok(Value::Boolean(*v != 0)),
 
             (Value::Float64(v), DataType::Float64) => Ok(Value::Float64(*v)),
-            (Value::Float64(v), DataType::Int64) => Ok(Value::Int64(*v as i64)),
+            (Value::Float64(v), DataType::Int64) => {
+                // `as i64` silently saturates on out-of-range values and maps NaN to 0,
+                // which would contradict this method's "errors if the cast is illegal"
+                // contract. Reject anything that wouldn't round-trip.
+                if v.is_finite() && *v >= i64::MIN as f64 && *v <= i64::MAX as f64 {
+                    Ok(Value::Int64(*v as i64))
+                } else {
+                    Err(BasaltError::Type {
+                        message: format!("cannot cast {v} to Int64: out of range or not finite"),
+                    })
+                }
+            }
             (Value::Float64(v), DataType::Utf8) => Ok(Value::Utf8(v.to_string())),
 
             (Value::Utf8(v), DataType::Utf8) => Ok(Value::Utf8(v.clone())),
@@ -139,6 +150,35 @@ mod tests {
     #[test]
     fn cast_empty_string_to_int_errors() {
         assert!(Value::Utf8(String::new()).cast_to(DataType::Int64).is_err());
+    }
+
+    /// Regression test: `Float64 -> Int64` must reject values that don't
+    /// round-trip instead of silently saturating (`as i64`'s actual behavior)
+    /// or mapping NaN to 0, either of which would contradict `cast_to`'s
+    /// documented "errors if the cast is illegal" contract.
+    #[test]
+    fn cast_float_to_int_rejects_nan_and_out_of_range() {
+        assert!(Value::Float64(f64::NAN).cast_to(DataType::Int64).is_err());
+        assert!(Value::Float64(f64::INFINITY)
+            .cast_to(DataType::Int64)
+            .is_err());
+        assert!(Value::Float64(f64::NEG_INFINITY)
+            .cast_to(DataType::Int64)
+            .is_err());
+        assert!(Value::Float64(1e300).cast_to(DataType::Int64).is_err());
+        assert!(Value::Float64(-1e300).cast_to(DataType::Int64).is_err());
+    }
+
+    #[test]
+    fn cast_float_to_int_accepts_in_range_values() {
+        assert_eq!(
+            Value::Float64(42.9).cast_to(DataType::Int64).unwrap(),
+            Value::Int64(42)
+        );
+        assert_eq!(
+            Value::Float64(-1.0).cast_to(DataType::Int64).unwrap(),
+            Value::Int64(-1)
+        );
     }
 
     #[test]

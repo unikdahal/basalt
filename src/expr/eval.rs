@@ -113,28 +113,55 @@ fn eval_logical(
     batch: &RecordBatch,
     row: usize,
 ) -> Result<Value> {
+    // Evaluate the LHS first and short-circuit before touching the RHS at all:
+    // `false AND <rhs>` is `false` and `true OR <rhs>` is `true` regardless of
+    // what the RHS evaluates to, so an RHS that would error (division by zero,
+    // overflow) or do needless work must never be evaluated in those cases.
     let lhs = eval(left, batch, row)?;
+    let lhs_is_null = lhs.is_null();
+
+    let short_circuit = match (op, &lhs) {
+        (BinaryOp::And, Value::Boolean(false)) => Some(Value::Boolean(false)),
+        (BinaryOp::Or, Value::Boolean(true)) => Some(Value::Boolean(true)),
+        _ => None,
+    };
+    if let Some(result) = short_circuit {
+        return Ok(result);
+    }
+    if !matches!(lhs, Value::Boolean(_) | Value::Null) {
+        return Err(BasaltError::Type {
+            message: format!(
+                "expected boolean operand for {}, found {lhs}",
+                if op == BinaryOp::And { "AND" } else { "OR" }
+            ),
+        });
+    }
+
     let rhs = eval(right, batch, row)?;
 
     match op {
-        BinaryOp::And => match (lhs, rhs) {
-            (Value::Boolean(false), _) | (_, Value::Boolean(false)) => Ok(Value::Boolean(false)),
-            (Value::Boolean(true), Value::Boolean(true)) => Ok(Value::Boolean(true)),
-            (Value::Boolean(_), Value::Null)
-            | (Value::Null, Value::Boolean(_))
-            | (Value::Null, Value::Null) => Ok(Value::Null),
-            (l, r) => Err(BasaltError::Type {
-                message: format!("expected boolean operands for AND, found {l} and {r}"),
+        BinaryOp::And => match rhs {
+            Value::Boolean(false) => Ok(Value::Boolean(false)),
+            Value::Boolean(true) => Ok(if lhs_is_null {
+                Value::Null
+            } else {
+                Value::Boolean(true)
+            }),
+            Value::Null => Ok(Value::Null),
+            r => Err(BasaltError::Type {
+                message: format!("expected boolean operands for AND, found {lhs} and {r}"),
             }),
         },
-        BinaryOp::Or => match (lhs, rhs) {
-            (Value::Boolean(true), _) | (_, Value::Boolean(true)) => Ok(Value::Boolean(true)),
-            (Value::Boolean(false), Value::Boolean(false)) => Ok(Value::Boolean(false)),
-            (Value::Boolean(_), Value::Null)
-            | (Value::Null, Value::Boolean(_))
-            | (Value::Null, Value::Null) => Ok(Value::Null),
-            (l, r) => Err(BasaltError::Type {
-                message: format!("expected boolean operands for OR, found {l} and {r}"),
+        BinaryOp::Or => match rhs {
+            Value::Boolean(true) => Ok(Value::Boolean(true)),
+            Value::Boolean(false) => Ok(if lhs_is_null {
+                Value::Null
+            } else {
+                Value::Boolean(false)
+            }),
+            Value::Null => Ok(Value::Null),
+            r => Err(BasaltError::Type {
+                message: format!("expected boolean operands for OR, found {lhs} and {r}"),
             }),
         },
         _ => unreachable!(),
@@ -324,6 +351,41 @@ mod tests {
             right: Box::new(Expr::Literal(Value::Null)),
         };
         assert_eq!(eval(&or_true, &batch, 0).unwrap(), Value::Boolean(true));
+    }
+
+    /// Regression test: `false AND <rhs>` must short-circuit and never
+    /// evaluate the RHS — a prior version evaluated both sides unconditionally,
+    /// so an erroring RHS (e.g. division by zero) would surface even though
+    /// SQL's three-valued logic already knows the answer from the LHS alone.
+    #[test]
+    fn test_and_short_circuits_on_false_lhs_without_evaluating_rhs() {
+        let batch = test_batch();
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Literal(Value::Boolean(false))),
+            op: BinaryOp::And,
+            right: Box::new(Expr::Binary {
+                left: Box::new(Expr::Literal(Value::Int64(1))),
+                op: BinaryOp::Div,
+                right: Box::new(Expr::Literal(Value::Int64(0))),
+            }),
+        };
+        assert_eq!(eval(&expr, &batch, 0).unwrap(), Value::Boolean(false));
+    }
+
+    /// Regression test: `true OR <rhs>` must short-circuit the same way.
+    #[test]
+    fn test_or_short_circuits_on_true_lhs_without_evaluating_rhs() {
+        let batch = test_batch();
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Literal(Value::Boolean(true))),
+            op: BinaryOp::Or,
+            right: Box::new(Expr::Binary {
+                left: Box::new(Expr::Literal(Value::Int64(1))),
+                op: BinaryOp::Div,
+                right: Box::new(Expr::Literal(Value::Int64(0))),
+            }),
+        };
+        assert_eq!(eval(&expr, &batch, 0).unwrap(), Value::Boolean(true));
     }
 
     #[test]
