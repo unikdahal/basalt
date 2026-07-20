@@ -85,7 +85,7 @@ impl CsvReader {
 
         let infer_limit = options.infer_rows.unwrap_or(data_records.len()).min(data_records.len());
 
-        for (r, row) in data_records.iter().take(infer_limit).enumerate() {
+        for (r, row) in data_records.iter().enumerate() {
             let line_num = r + 1 + if has_header { 1 } else { 0 };
             if row.len() != num_cols {
                 return Err(BasaltError::Csv {
@@ -96,11 +96,12 @@ impl CsvReader {
                     ),
                 });
             }
+            let narrow_types = r < infer_limit;
             for c in 0..num_cols {
                 let val = &row[c];
                 if val == &options.null_literal || val.is_empty() {
                     has_null[c] = true;
-                } else {
+                } else if narrow_types {
                     non_null_count[c] += 1;
                     if can_int[c] && val.parse::<i64>().is_err() {
                         can_int[c] = false;
@@ -317,5 +318,23 @@ mod tests {
         let batch = CsvReader::read_str(csv, &CsvReadOptions::default()).unwrap();
         assert_eq!(batch.num_rows(), 0);
         assert_eq!(batch.num_columns(), 3);
+    }
+
+    #[test]
+    fn test_csv_nullability_inference_out_of_sample() {
+        let csv = "val\n1\n2\n\n";
+        let mut options = CsvReadOptions::default();
+        options.infer_rows = Some(2);
+
+        let batch = CsvReader::read_str(csv, &options).unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        
+        let schema = batch.schema();
+        assert_eq!(schema.field(0).unwrap().data_type, DataType::Int64);
+        assert!(schema.field(0).unwrap().nullable);
+        
+        assert_eq!(batch.column(0).unwrap().get(0), Some(Value::Int64(1)));
+        assert_eq!(batch.column(0).unwrap().get(1), Some(Value::Int64(2)));
+        assert_eq!(batch.column(0).unwrap().get(2), Some(Value::Null));
     }
 }

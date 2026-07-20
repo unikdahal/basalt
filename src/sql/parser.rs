@@ -363,7 +363,7 @@ impl Parser {
 
     fn postfix_binding_power(&self, token: &Token) -> Option<u8> {
         match token {
-            Token::Keyword(Keyword::Is) => Some(15),
+            Token::Keyword(Keyword::Is) => Some(6),
             _ => None,
         }
     }
@@ -496,6 +496,44 @@ mod tests {
             Expr::IsNull {
                 expr: Box::new(Expr::Identifier("a".to_string())),
                 negated: true,
+            }
+        );
+
+        let expr = parse_expr_str("a = b IS NULL");
+        assert_eq!(
+            expr,
+            Expr::IsNull {
+                expr: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Identifier("a".to_string())),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expr::Identifier("b".to_string())),
+                }),
+                negated: false,
+            }
+        );
+
+        let expr = parse_expr_str("a + b IS NULL");
+        assert_eq!(
+            expr,
+            Expr::IsNull {
+                expr: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Identifier("a".to_string())),
+                    op: BinaryOp::Add,
+                    right: Box::new(Expr::Identifier("b".to_string())),
+                }),
+                negated: false,
+            }
+        );
+
+        let expr = parse_expr_str("-a IS NULL");
+        assert_eq!(
+            expr,
+            Expr::IsNull {
+                expr: Box::new(Expr::Unary {
+                    op: UnaryOp::Neg,
+                    expr: Box::new(Expr::Identifier("a".to_string())),
+                }),
+                negated: false,
             }
         );
     }

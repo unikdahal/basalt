@@ -12,7 +12,7 @@ pub enum BasaltError {
     Csv { line: usize, message: String },
 
     // ---- SQL frontend ----
-    #[error("syntax error at {span:?}: {message}")]
+    #[error("syntax error at {span}: {message}")]
     Syntax { span: Span, message: String },
 
     // ---- binding / semantic analysis ----
@@ -25,6 +25,9 @@ pub enum BasaltError {
     // ---- execution ----
     #[error("division by zero")]
     DivisionByZero,
+
+    #[error("numeric overflow")]
+    NumericOverflow,
 
     #[error("internal error: {0}")]
     Internal(String),

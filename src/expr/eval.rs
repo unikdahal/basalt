@@ -50,7 +50,10 @@ pub fn eval(expr: &Expr, batch: &RecordBatch, row: usize) -> Result<Value> {
             }
             match op {
                 UnaryOp::Neg => match val {
-                    Value::Int64(x) => Ok(Value::Int64(-x)),
+                    Value::Int64(x) => x
+                        .checked_neg()
+                        .map(Value::Int64)
+                        .ok_or(BasaltError::NumericOverflow),
                     Value::Float64(x) => Ok(Value::Float64(-x)),
                     other => Err(BasaltError::Type {
                         message: format!("cannot apply unary minus to non-numeric type {other}"),
@@ -142,17 +145,26 @@ fn eval_logical(
 fn eval_binary_non_null(op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
     match op {
         BinaryOp::Add => match (lhs, rhs) {
-            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a + b)),
+            (Value::Int64(a), Value::Int64(b)) => a
+                .checked_add(b)
+                .map(Value::Int64)
+                .ok_or(BasaltError::NumericOverflow),
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a + b)),
             _ => unreachable!(),
         },
         BinaryOp::Sub => match (lhs, rhs) {
-            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a - b)),
+            (Value::Int64(a), Value::Int64(b)) => a
+                .checked_sub(b)
+                .map(Value::Int64)
+                .ok_or(BasaltError::NumericOverflow),
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a - b)),
             _ => unreachable!(),
         },
         BinaryOp::Mul => match (lhs, rhs) {
-            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a * b)),
+            (Value::Int64(a), Value::Int64(b)) => a
+                .checked_mul(b)
+                .map(Value::Int64)
+                .ok_or(BasaltError::NumericOverflow),
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a * b)),
             _ => unreachable!(),
         },
@@ -161,7 +173,9 @@ fn eval_binary_non_null(op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
                 if b == 0 {
                     Err(BasaltError::DivisionByZero)
                 } else {
-                    Ok(Value::Int64(a / b))
+                    a.checked_div(b)
+                        .map(Value::Int64)
+                        .ok_or(BasaltError::NumericOverflow)
                 }
             }
             (Value::Float64(a), Value::Float64(b)) => {
@@ -178,7 +192,9 @@ fn eval_binary_non_null(op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
                 if b == 0 {
                     Err(BasaltError::DivisionByZero)
                 } else {
-                    Ok(Value::Int64(a % b))
+                    a.checked_rem(b)
+                        .map(Value::Int64)
+                        .ok_or(BasaltError::NumericOverflow)
                 }
             }
             (Value::Float64(a), Value::Float64(b)) => {
@@ -313,5 +329,37 @@ mod tests {
         };
         let err_float = eval(&div_float, &batch, 0).unwrap_err();
         assert!(matches!(err_float, BasaltError::DivisionByZero));
+    }
+
+    #[test]
+    fn test_eval_overflow() {
+        let batch = test_batch();
+        
+        let add_overflow = Expr::Binary {
+            left: Box::new(Expr::Literal(Value::Int64(i64::MAX))),
+            op: BinaryOp::Add,
+            right: Box::new(Expr::Literal(Value::Int64(1))),
+        };
+        assert!(matches!(eval(&add_overflow, &batch, 0).unwrap_err(), BasaltError::NumericOverflow));
+
+        let sub_overflow = Expr::Binary {
+            left: Box::new(Expr::Literal(Value::Int64(i64::MIN))),
+            op: BinaryOp::Sub,
+            right: Box::new(Expr::Literal(Value::Int64(1))),
+        };
+        assert!(matches!(eval(&sub_overflow, &batch, 0).unwrap_err(), BasaltError::NumericOverflow));
+
+        let mul_overflow = Expr::Binary {
+            left: Box::new(Expr::Literal(Value::Int64(i64::MAX))),
+            op: BinaryOp::Mul,
+            right: Box::new(Expr::Literal(Value::Int64(2))),
+        };
+        assert!(matches!(eval(&mul_overflow, &batch, 0).unwrap_err(), BasaltError::NumericOverflow));
+
+        let neg_overflow = Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: Box::new(Expr::Literal(Value::Int64(i64::MIN))),
+        };
+        assert!(matches!(eval(&neg_overflow, &batch, 0).unwrap_err(), BasaltError::NumericOverflow));
     }
 }
