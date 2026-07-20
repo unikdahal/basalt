@@ -1,0 +1,27 @@
+[package]
+name = "basalt"
+version = "0.1.0"
+edition = "2021"
+description = "A distributed, Arrow-native SQL query engine over Apache Iceberg"
+license = "Apache-2.0"
+repository = "https://github.com/unikdahal/basalt"
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "basalt"
+path = "src/main.rs"
+
+[lib]
+name = "basalt"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 0

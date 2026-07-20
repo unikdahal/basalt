@@ -1,0 +1,6 @@
+/target
+*.swp
+.DS_Store
+
+# personal design notes, not part of the public project
+/design-docs/
