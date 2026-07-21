@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use super::aggregate::AggregateExec;
 use super::filter::FilterExec;
+use super::join::{HashJoinExec, NestedLoopJoinExec};
 use super::limit::LimitExec;
 use super::plan::ExecutionPlanRef;
 use super::projection::ProjectionExec;
@@ -18,7 +19,7 @@ use super::scan::MemoryTableSource;
 use super::sort::{PhysicalSortExpr, SortExec};
 use crate::error::{BasaltError, Result};
 use crate::expr::expr::{Expr, UnaryOp};
-use crate::logical_plan::LogicalPlan;
+use crate::logical_plan::{JoinType, LogicalPlan};
 use crate::physical_expr::binary::BinaryExpr;
 use crate::physical_expr::cast::CastExpr;
 use crate::physical_expr::column::ColumnExpr;
@@ -140,9 +141,56 @@ impl PhysicalPlanner {
                     schema.clone(),
                 )))
             }
-            LogicalPlan::Join { .. } => Err(BasaltError::Internal(
-                "Join physical planning: see physical_plan::join".to_string(),
-            )),
+            LogicalPlan::Join {
+                left,
+                right,
+                on,
+                filter,
+                join_type,
+                schema,
+            } => {
+                let build = self.create_physical_plan(left)?;
+                let probe = self.create_physical_plan(right)?;
+                if !on.is_empty() {
+                    if filter.is_some() {
+                        return Err(BasaltError::Internal(
+                            "HashJoinExec does not yet support a residual filter alongside \
+                             equi-join keys"
+                                .to_string(),
+                        ));
+                    }
+                    let physical_on = on
+                        .iter()
+                        .map(|(l, r)| {
+                            Ok((self.create_physical_expr(l)?, self.create_physical_expr(r)?))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(Arc::new(HashJoinExec::new(
+                        build,
+                        probe,
+                        physical_on,
+                        *join_type,
+                        schema.clone(),
+                    )))
+                } else if let Some(f) = filter {
+                    if *join_type != JoinType::Inner {
+                        return Err(BasaltError::Internal(format!(
+                            "NestedLoopJoinExec only supports Inner joins, got {join_type:?}"
+                        )));
+                    }
+                    let predicate = self.create_physical_expr(f)?;
+                    Ok(Arc::new(NestedLoopJoinExec::new(
+                        build,
+                        probe,
+                        predicate,
+                        schema.clone(),
+                    )))
+                } else {
+                    Err(BasaltError::Internal(
+                        "Join requires either equi-join keys or a filter predicate".to_string(),
+                    ))
+                }
+            }
         }
     }
 
@@ -370,5 +418,42 @@ mod tests {
             (0..3).map(|i| col.value(i)).collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
+    }
+
+    #[test]
+    fn end_to_end_inner_join() {
+        let left_source = Arc::new(MemoryTableSource::new(
+            schema(),
+            vec![source_batch(&[1, 2, 3])],
+        ));
+        let right_source = Arc::new(MemoryTableSource::new(
+            schema(),
+            vec![source_batch(&[2, 3, 4])],
+        ));
+        let left = LogicalPlanBuilder::scan("l", left_source);
+        let right = LogicalPlanBuilder::scan("r", right_source).build();
+
+        let key = Expr::Column {
+            index: 0,
+            data_type: DataType::Int64,
+            nullable: false,
+        };
+        let logical = left
+            .join(
+                right,
+                vec![(key.clone(), key)],
+                None,
+                crate::logical_plan::JoinType::Inner,
+            )
+            .unwrap()
+            .build();
+
+        let physical = PhysicalPlanner.create_physical_plan(&logical).unwrap();
+        let batches: Vec<_> = physical
+            .execute(0)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(batches[0].num_rows(), 2); // 2 and 3 match on both sides
     }
 }
