@@ -192,7 +192,9 @@ mod tests {
         let result = expr
             .transform_up(&mut |e| {
                 Ok(match e {
-                    Expr::Literal(Value::Int64(1)) => Transformed::Yes(Expr::Literal(Value::Int64(2))),
+                    Expr::Literal(Value::Int64(1)) => {
+                        Transformed::Yes(Expr::Literal(Value::Int64(2)))
+                    }
                     other => Transformed::No(other),
                 })
             })

@@ -127,7 +127,11 @@ impl JoinGraph {
                 next = None;
                 return None;
             }
-            next = if current == 0 { None } else { Some((current.wrapping_sub(1)) & mask) };
+            next = if current == 0 {
+                None
+            } else {
+                Some((current.wrapping_sub(1)) & mask)
+            };
             Some(current)
         })
     }
@@ -177,10 +181,23 @@ mod tests {
     #[test]
     fn neighbors_excludes_the_set_itself_and_finds_both_directions() {
         let edges = vec![
-            JoinEdge { left_relation: 0, left_column: 0, right_relation: 1, right_column: 0 },
-            JoinEdge { left_relation: 2, left_column: 0, right_relation: 1, right_column: 0 },
+            JoinEdge {
+                left_relation: 0,
+                left_column: 0,
+                right_relation: 1,
+                right_column: 0,
+            },
+            JoinEdge {
+                left_relation: 2,
+                left_column: 0,
+                right_relation: 1,
+                right_column: 0,
+            },
         ];
-        let graph = JoinGraph { relations: vec![], edges };
+        let graph = JoinGraph {
+            relations: vec![],
+            edges,
+        };
         assert_eq!(graph.neighbors(singleton(1)), singleton(0) | singleton(2));
         assert_eq!(graph.neighbors(singleton(0)), singleton(1));
         assert_eq!(graph.neighbors(singleton(0) | singleton(1)), singleton(2));
@@ -208,8 +225,16 @@ mod tests {
 
     #[test]
     fn is_connected_finds_an_edge_in_either_direction() {
-        let edges = vec![JoinEdge { left_relation: 0, left_column: 0, right_relation: 1, right_column: 0 }];
-        let graph = JoinGraph { relations: vec![], edges };
+        let edges = vec![JoinEdge {
+            left_relation: 0,
+            left_column: 0,
+            right_relation: 1,
+            right_column: 0,
+        }];
+        let graph = JoinGraph {
+            relations: vec![],
+            edges,
+        };
         assert!(graph.is_connected(singleton(0), singleton(1)));
         assert!(graph.is_connected(singleton(1), singleton(0))); // order-independent
         assert!(!graph.is_connected(singleton(0), singleton(2)));
@@ -217,8 +242,16 @@ mod tests {
 
     #[test]
     fn edges_between_normalizes_orientation_to_match_the_query_sides() {
-        let edges = vec![JoinEdge { left_relation: 1, left_column: 5, right_relation: 0, right_column: 2 }];
-        let graph = JoinGraph { relations: vec![], edges };
+        let edges = vec![JoinEdge {
+            left_relation: 1,
+            left_column: 5,
+            right_relation: 0,
+            right_column: 2,
+        }];
+        let graph = JoinGraph {
+            relations: vec![],
+            edges,
+        };
         // Query with s1={0}, s2={1}: the edge's actual left is relation 1
         // (in s2), so it must come back normalized with left_relation=0.
         let found = graph.edges_between(singleton(0), singleton(1));

@@ -23,12 +23,27 @@ impl OptimizerRule for MergeFilters {
         ApplyOrder::BottomUp
     }
 
-    fn apply(&self, plan: LogicalPlan, _ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>> {
-        let LogicalPlan::Filter { input, predicate: outer } = plan else {
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        _ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>> {
+        let LogicalPlan::Filter {
+            input,
+            predicate: outer,
+        } = plan
+        else {
             return Ok(Transformed::No(plan));
         };
-        let LogicalPlan::Filter { input: inner_input, predicate: inner } = input.as_ref() else {
-            return Ok(Transformed::No(LogicalPlan::Filter { input, predicate: outer }));
+        let LogicalPlan::Filter {
+            input: inner_input,
+            predicate: inner,
+        } = input.as_ref()
+        else {
+            return Ok(Transformed::No(LogicalPlan::Filter {
+                input,
+                predicate: outer,
+            }));
         };
         Ok(Transformed::Yes(LogicalPlan::Filter {
             input: inner_input.clone(),
@@ -58,7 +73,9 @@ mod tests {
 
     #[test]
     fn merges_nested_filters_into_one_conjunction() {
-        let scan = LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(schema(), vec![]))).build();
+        let scan =
+            LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(schema(), vec![])))
+                .build();
         let p1 = Expr::Literal(Value::Boolean(true));
         let p2 = Expr::Literal(Value::Boolean(false));
         let plan = LogicalPlan::Filter {
@@ -88,7 +105,9 @@ mod tests {
 
     #[test]
     fn single_filter_is_unchanged() {
-        let scan = LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(schema(), vec![]))).build();
+        let scan =
+            LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(schema(), vec![])))
+                .build();
         let plan = LogicalPlan::Filter {
             input: scan,
             predicate: Expr::Literal(Value::Boolean(true)),

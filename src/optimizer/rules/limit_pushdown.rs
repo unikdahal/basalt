@@ -40,11 +40,20 @@ impl OptimizerRule for LimitPushdown {
         ApplyOrder::BottomUp
     }
 
-    fn apply(&self, plan: LogicalPlan, _ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>> {
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        _ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>> {
         let LogicalPlan::Limit { input, skip, fetch } = plan else {
             return Ok(Transformed::No(plan));
         };
-        let LogicalPlan::Projection { input: proj_input, exprs, schema } = input.as_ref() else {
+        let LogicalPlan::Projection {
+            input: proj_input,
+            exprs,
+            schema,
+        } = input.as_ref()
+        else {
             return Ok(Transformed::No(LogicalPlan::Limit { input, skip, fetch }));
         };
 
@@ -84,7 +93,9 @@ mod tests {
 
     #[test]
     fn pushes_limit_through_projection() {
-        let scan = LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(schema(), vec![]))).build();
+        let scan =
+            LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(schema(), vec![])))
+                .build();
         let projection = LogicalPlan::Projection {
             input: scan,
             exprs: vec![col(0)],
@@ -108,7 +119,9 @@ mod tests {
 
     #[test]
     fn does_not_push_through_a_filter() {
-        let scan = LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(schema(), vec![]))).build();
+        let scan =
+            LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(schema(), vec![])))
+                .build();
         let filter = LogicalPlan::Filter {
             input: scan,
             predicate: Expr::Literal(crate::types::value::Value::Boolean(true)),

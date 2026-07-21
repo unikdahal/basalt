@@ -21,12 +21,15 @@ use crate::optimizer::cost::model::CostWeights;
 pub fn greedy_operator_ordering(graph: &JoinGraph, weights: &CostWeights) -> Result<PlanCandidate> {
     let n = graph.num_relations();
     if n == 0 {
-        return Err(BasaltError::Internal("cannot join zero relations".to_string()));
+        return Err(BasaltError::Internal(
+            "cannot join zero relations".to_string(),
+        ));
     }
 
     let opt = DpJoinOptimizer::new(graph, weights);
-    let mut current: HashMap<RelationSet, PlanCandidate> =
-        (0..n).map(|i| (singleton(i), opt.base_candidate(i))).collect();
+    let mut current: HashMap<RelationSet, PlanCandidate> = (0..n)
+        .map(|i| (singleton(i), opt.base_candidate(i)))
+        .collect();
 
     while current.len() > 1 {
         let sets: Vec<RelationSet> = current.keys().copied().collect();
@@ -47,7 +50,11 @@ pub fn greedy_operator_ordering(graph: &JoinGraph, weights: &CostWeights) -> Res
                 // rather than cost keeps this a genuinely different,
                 // cheaper heuristic from a cost-based search, not DP
                 // restricted to pairwise steps.
-                let candidate_card = candidate.cardinality.get_value().copied().unwrap_or(usize::MAX);
+                let candidate_card = candidate
+                    .cardinality
+                    .get_value()
+                    .copied()
+                    .unwrap_or(usize::MAX);
                 let better = best.as_ref().is_none_or(|(_, _, b)| {
                     candidate_card < b.cardinality.get_value().copied().unwrap_or(usize::MAX)
                 });
@@ -113,17 +120,29 @@ mod tests {
     }
 
     fn relation(name: &str, num_rows: usize, ndv: usize) -> RelationNode {
-        let plan = LogicalPlanBuilder::scan(name, Arc::new(MemoryTableSource::new(schema(name), vec![]))).build();
+        let plan =
+            LogicalPlanBuilder::scan(name, Arc::new(MemoryTableSource::new(schema(name), vec![])))
+                .build();
         let mut stats = TableStatistics::unknown(1);
         stats.num_rows = Precision::Exact(num_rows);
         stats.column_statistics[0].distinct_count = Precision::Exact(ndv);
-        RelationNode { plan, stats: Arc::new(stats) }
+        RelationNode {
+            plan,
+            stats: Arc::new(stats),
+        }
     }
 
     fn chain_graph(n: usize) -> JoinGraph {
-        let relations: Vec<RelationNode> = (0..n).map(|i| relation(&format!("t{i}"), 100 + i, 50)).collect();
+        let relations: Vec<RelationNode> = (0..n)
+            .map(|i| relation(&format!("t{i}"), 100 + i, 50))
+            .collect();
         let edges: Vec<JoinEdge> = (0..n - 1)
-            .map(|i| JoinEdge { left_relation: i, left_column: 0, right_relation: i + 1, right_column: 0 })
+            .map(|i| JoinEdge {
+                left_relation: i,
+                left_column: 0,
+                right_relation: i + 1,
+                right_column: 0,
+            })
             .collect();
         JoinGraph::new(relations, edges)
     }

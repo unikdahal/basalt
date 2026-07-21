@@ -29,7 +29,11 @@ impl OptimizerRule for ConstantFolding {
         ApplyOrder::BottomUp
     }
 
-    fn apply(&self, plan: LogicalPlan, _ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>> {
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        _ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>> {
         super::common::map_all_exprs(plan, fold_one)
     }
 }
@@ -206,7 +210,9 @@ mod tests {
                 right: Box::new(Expr::Literal(Value::Int64(1))),
             })
             .build();
-        let result = crate::optimizer::rules::common::map_all_exprs(plan.as_ref().clone(), fold_one).unwrap();
+        let result =
+            crate::optimizer::rules::common::map_all_exprs(plan.as_ref().clone(), fold_one)
+                .unwrap();
         assert!(result.is_yes());
         match result.into_inner() {
             LogicalPlan::Filter { predicate, .. } => {
@@ -228,6 +234,9 @@ mod tests {
             .unwrap()
             .into_inner();
         let twice = rule.apply(once.clone(), &NoStatistics).unwrap();
-        assert!(!twice.is_yes(), "second application should find nothing left to fold");
+        assert!(
+            !twice.is_yes(),
+            "second application should find nothing left to fold"
+        );
     }
 }

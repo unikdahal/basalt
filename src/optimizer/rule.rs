@@ -41,7 +41,11 @@ pub trait OptimizerRule: std::fmt::Debug {
     /// # Errors
     /// Errors if the rule can't validly rewrite this plan (a malformed
     /// input, not "the rule doesn't apply" — that's `Transformed::No`).
-    fn apply(&self, plan: LogicalPlan, ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>>;
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>>;
 
     fn apply_order(&self) -> ApplyOrder {
         ApplyOrder::BottomUp
@@ -124,7 +128,10 @@ mod tests {
 
     fn scan_plan() -> LogicalPlan {
         let source = Arc::new(MemoryTableSource::new(schema(), vec![]));
-        LogicalPlanBuilder::scan("t", source).build().as_ref().clone()
+        LogicalPlanBuilder::scan("t", source)
+            .build()
+            .as_ref()
+            .clone()
     }
 
     #[derive(Debug)]

@@ -39,7 +39,11 @@ pub enum PruningResult {
 /// happen for a well-formed plan.
 pub fn prune(predicate: &Expr, stats: &[ColumnStatistics]) -> crate::error::Result<PruningResult> {
     Ok(match predicate {
-        Expr::Binary { left, op: BinaryOp::And, right } => {
+        Expr::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
             // Either side proving CanSkip is enough — if no row can
             // satisfy the left conjunct, no row satisfies the AND either.
             match (prune(left, stats)?, prune(right, stats)?) {
@@ -47,7 +51,11 @@ pub fn prune(predicate: &Expr, stats: &[ColumnStatistics]) -> crate::error::Resu
                 _ => PruningResult::MustScan,
             }
         }
-        Expr::Binary { left, op: BinaryOp::Or, right } => {
+        Expr::Binary {
+            left,
+            op: BinaryOp::Or,
+            right,
+        } => {
             // Both sides must prove CanSkip — a surviving row could
             // satisfy either disjunct.
             match (prune(left, stats)?, prune(right, stats)?) {
@@ -133,7 +141,11 @@ fn prune_comparison(
         // NotEq can't be proven false by an interval alone — conservative.
         _ => return Ok(PruningResult::MustScan),
     };
-    Ok(if can_skip { PruningResult::CanSkip } else { PruningResult::MustScan })
+    Ok(if can_skip {
+        PruningResult::CanSkip
+    } else {
+        PruningResult::MustScan
+    })
 }
 
 fn flip(op: BinaryOp) -> BinaryOp {
@@ -171,7 +183,11 @@ mod tests {
     use crate::types::data_type::DataType;
 
     fn col(i: usize) -> Expr {
-        Expr::Column { index: i, data_type: DataType::Int64, nullable: false }
+        Expr::Column {
+            index: i,
+            data_type: DataType::Int64,
+            nullable: false,
+        }
     }
 
     fn lit(v: i64) -> Expr {
@@ -189,28 +205,44 @@ mod tests {
     fn skips_when_predicate_is_provably_outside_the_range() {
         // amount > 1000, but this partition's max is 500 — provably no match.
         let stats = stats_with_range(0, 500);
-        let predicate = Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Gt, right: Box::new(lit(1000)) };
+        let predicate = Expr::Binary {
+            left: Box::new(col(0)),
+            op: BinaryOp::Gt,
+            right: Box::new(lit(1000)),
+        };
         assert_eq!(prune(&predicate, &stats).unwrap(), PruningResult::CanSkip);
     }
 
     #[test]
     fn must_scan_when_the_range_could_contain_a_match() {
         let stats = stats_with_range(0, 2000);
-        let predicate = Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Gt, right: Box::new(lit(1000)) };
+        let predicate = Expr::Binary {
+            left: Box::new(col(0)),
+            op: BinaryOp::Gt,
+            right: Box::new(lit(1000)),
+        };
         assert_eq!(prune(&predicate, &stats).unwrap(), PruningResult::MustScan);
     }
 
     #[test]
     fn must_scan_without_statistics() {
         let stats = vec![ColumnStatistics::unknown()];
-        let predicate = Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Gt, right: Box::new(lit(1000)) };
+        let predicate = Expr::Binary {
+            left: Box::new(col(0)),
+            op: BinaryOp::Gt,
+            right: Box::new(lit(1000)),
+        };
         assert_eq!(prune(&predicate, &stats).unwrap(), PruningResult::MustScan);
     }
 
     #[test]
     fn equality_outside_range_can_skip() {
         let stats = stats_with_range(0, 100);
-        let predicate = Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Eq, right: Box::new(lit(500)) };
+        let predicate = Expr::Binary {
+            left: Box::new(col(0)),
+            op: BinaryOp::Eq,
+            right: Box::new(lit(500)),
+        };
         assert_eq!(prune(&predicate, &stats).unwrap(), PruningResult::CanSkip);
     }
 
@@ -218,9 +250,17 @@ mod tests {
     fn and_skips_if_either_conjunct_proves_no_match() {
         let stats = stats_with_range(0, 100);
         let predicate = Expr::Binary {
-            left: Box::new(Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Gt, right: Box::new(lit(1000)) }),
+            left: Box::new(Expr::Binary {
+                left: Box::new(col(0)),
+                op: BinaryOp::Gt,
+                right: Box::new(lit(1000)),
+            }),
             op: BinaryOp::And,
-            right: Box::new(Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Gt, right: Box::new(lit(-1000)) }),
+            right: Box::new(Expr::Binary {
+                left: Box::new(col(0)),
+                op: BinaryOp::Gt,
+                right: Box::new(lit(-1000)),
+            }),
         };
         assert_eq!(prune(&predicate, &stats).unwrap(), PruningResult::CanSkip);
     }
@@ -230,9 +270,17 @@ mod tests {
         let stats = stats_with_range(0, 100);
         // First disjunct provably fails; second doesn't — must scan.
         let predicate = Expr::Binary {
-            left: Box::new(Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Gt, right: Box::new(lit(1000)) }),
+            left: Box::new(Expr::Binary {
+                left: Box::new(col(0)),
+                op: BinaryOp::Gt,
+                right: Box::new(lit(1000)),
+            }),
             op: BinaryOp::Or,
-            right: Box::new(Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Lt, right: Box::new(lit(50)) }),
+            right: Box::new(Expr::Binary {
+                left: Box::new(col(0)),
+                op: BinaryOp::Lt,
+                right: Box::new(lit(50)),
+            }),
         };
         assert_eq!(prune(&predicate, &stats).unwrap(), PruningResult::MustScan);
     }
@@ -240,7 +288,11 @@ mod tests {
     #[test]
     fn out_of_range_column_index_errors_instead_of_guessing() {
         let stats: Vec<ColumnStatistics> = vec![];
-        let predicate = Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Gt, right: Box::new(lit(1000)) };
+        let predicate = Expr::Binary {
+            left: Box::new(col(0)),
+            op: BinaryOp::Gt,
+            right: Box::new(lit(1000)),
+        };
         assert!(prune(&predicate, &stats).is_err());
     }
 }

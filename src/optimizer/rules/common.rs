@@ -11,7 +11,10 @@ use crate::optimizer::tree_node::Transformed;
 /// Applies `f` to every `Expr` this plan node directly carries (not its
 /// children's expressions — the caller's rule runs bottom-up via
 /// `TreeNode::transform_up`, so children were already visited).
-pub fn map_all_exprs(plan: LogicalPlan, f: impl Fn(Expr) -> Result<Expr>) -> Result<Transformed<LogicalPlan>> {
+pub fn map_all_exprs(
+    plan: LogicalPlan,
+    f: impl Fn(Expr) -> Result<Expr>,
+) -> Result<Transformed<LogicalPlan>> {
     let mut changed = false;
     let mut apply = |e: Expr| -> Result<Expr> {
         let rewritten = f(e.clone())?;
@@ -22,7 +25,11 @@ pub fn map_all_exprs(plan: LogicalPlan, f: impl Fn(Expr) -> Result<Expr>) -> Res
     };
 
     let mapped = match plan {
-        LogicalPlan::Projection { input, exprs, schema } => LogicalPlan::Projection {
+        LogicalPlan::Projection {
+            input,
+            exprs,
+            schema,
+        } => LogicalPlan::Projection {
             input,
             exprs: exprs.into_iter().map(&mut apply).collect::<Result<_>>()?,
             schema,
@@ -31,23 +38,41 @@ pub fn map_all_exprs(plan: LogicalPlan, f: impl Fn(Expr) -> Result<Expr>) -> Res
             input,
             predicate: apply(predicate)?,
         },
-        LogicalPlan::Join { left, right, on, filter, join_type, schema } => {
+        LogicalPlan::Join {
+            left,
+            right,
+            on,
+            filter,
+            join_type,
+            schema,
+        } => {
             let on = on
                 .into_iter()
                 .map(|(l, r)| Ok((apply(l)?, apply(r)?)))
                 .collect::<Result<Vec<_>>>()?;
             let filter = filter.map(&mut apply).transpose()?;
-            LogicalPlan::Join { left, right, on, filter, join_type, schema }
-        }
-        LogicalPlan::TableScan { table_name, source, projection, filters, schema } => {
-            LogicalPlan::TableScan {
-                table_name,
-                source,
-                projection,
-                filters: filters.into_iter().map(&mut apply).collect::<Result<_>>()?,
+            LogicalPlan::Join {
+                left,
+                right,
+                on,
+                filter,
+                join_type,
                 schema,
             }
         }
+        LogicalPlan::TableScan {
+            table_name,
+            source,
+            projection,
+            filters,
+            schema,
+        } => LogicalPlan::TableScan {
+            table_name,
+            source,
+            projection,
+            filters: filters.into_iter().map(&mut apply).collect::<Result<_>>()?,
+            schema,
+        },
         LogicalPlan::Sort { input, exprs } => LogicalPlan::Sort {
             input,
             exprs: exprs
@@ -138,8 +163,16 @@ pub fn split_equi_join_conjunct(conjunct: &Expr, left_width: usize) -> Option<(E
         return None;
     };
     let (
-        Expr::Column { index: i, data_type: dt_i, nullable: n_i },
-        Expr::Column { index: j, data_type: dt_j, nullable: n_j },
+        Expr::Column {
+            index: i,
+            data_type: dt_i,
+            nullable: n_i,
+        },
+        Expr::Column {
+            index: j,
+            data_type: dt_j,
+            nullable: n_j,
+        },
     ) = (left.as_ref(), right.as_ref())
     else {
         return None;
@@ -152,13 +185,29 @@ pub fn split_equi_join_conjunct(conjunct: &Expr, left_width: usize) -> Option<(E
     }
     let (left_col, right_col) = if i_is_left {
         (
-            Expr::Column { index: *i, data_type: *dt_i, nullable: *n_i },
-            Expr::Column { index: *j - left_width, data_type: *dt_j, nullable: *n_j },
+            Expr::Column {
+                index: *i,
+                data_type: *dt_i,
+                nullable: *n_i,
+            },
+            Expr::Column {
+                index: *j - left_width,
+                data_type: *dt_j,
+                nullable: *n_j,
+            },
         )
     } else {
         (
-            Expr::Column { index: *j, data_type: *dt_j, nullable: *n_j },
-            Expr::Column { index: *i - left_width, data_type: *dt_i, nullable: *n_i },
+            Expr::Column {
+                index: *j,
+                data_type: *dt_j,
+                nullable: *n_j,
+            },
+            Expr::Column {
+                index: *i - left_width,
+                data_type: *dt_i,
+                nullable: *n_i,
+            },
         )
     };
     Some((left_col, right_col))
@@ -176,7 +225,11 @@ pub fn rebase_columns(expr: Expr, offset: usize) -> Result<Expr> {
     use crate::optimizer::tree_node::TreeNode;
     let result = expr.transform_up(&mut |e| {
         Ok(match e {
-            Expr::Column { index, data_type, nullable } => Transformed::Yes(Expr::Column {
+            Expr::Column {
+                index,
+                data_type,
+                nullable,
+            } => Transformed::Yes(Expr::Column {
                 index: index - offset,
                 data_type,
                 nullable,

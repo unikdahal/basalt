@@ -21,7 +21,9 @@ impl TableStatistics {
         TableStatistics {
             num_rows: Precision::Absent,
             total_byte_size: Precision::Absent,
-            column_statistics: (0..num_columns).map(|_| ColumnStatistics::unknown()).collect(),
+            column_statistics: (0..num_columns)
+                .map(|_| ColumnStatistics::unknown())
+                .collect(),
         }
     }
 }

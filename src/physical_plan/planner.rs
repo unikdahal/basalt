@@ -61,9 +61,9 @@ impl PhysicalPlanner {
             // batches rather than a dedicated executor, since "produce zero
             // rows of this schema" is exactly what an empty batch list
             // already does.
-            LogicalPlan::EmptyRelation { schema } => {
-                Ok(Arc::new(super::scan::MemoryScanExec::new(schema.clone(), vec![])))
-            }
+            LogicalPlan::EmptyRelation { schema } => Ok(Arc::new(
+                super::scan::MemoryScanExec::new(schema.clone(), vec![]),
+            )),
             LogicalPlan::Filter { input, predicate } => {
                 let child = self.create_physical_plan(input)?;
                 let expr = self.create_physical_expr(predicate)?;

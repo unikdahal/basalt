@@ -29,7 +29,11 @@ impl OptimizerRule for SimplifyExpressions {
         ApplyOrder::BottomUp
     }
 
-    fn apply(&self, plan: LogicalPlan, _ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>> {
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        _ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>> {
         super::common::map_all_exprs(plan, simplify_one)
     }
 }
@@ -52,7 +56,11 @@ fn simplify_node(expr: Expr) -> Transformed<Expr> {
         // true AND x -> x; false AND x -> false (always valid: AND's
         // short-circuit truth table doesn't depend on x's nullability when
         // the *other* operand is already a known non-null boolean).
-        Expr::Binary { left, op: BinaryOp::And, right } => {
+        Expr::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
             if is_literal_bool(left, true) {
                 return Transformed::Yes((**right).clone());
             }
@@ -65,7 +73,11 @@ fn simplify_node(expr: Expr) -> Transformed<Expr> {
             Transformed::No(expr)
         }
         // x OR true -> true; false OR x -> x.
-        Expr::Binary { left, op: BinaryOp::Or, right } => {
+        Expr::Binary {
+            left,
+            op: BinaryOp::Or,
+            right,
+        } => {
             if is_literal_bool(left, true) || is_literal_bool(right, true) {
                 return Transformed::Yes(Expr::Literal(Value::Boolean(true)));
             }
@@ -78,8 +90,15 @@ fn simplify_node(expr: Expr) -> Transformed<Expr> {
             Transformed::No(expr)
         }
         // NOT NOT x -> x.
-        Expr::Unary { op: UnaryOp::Not, expr: inner } => {
-            if let Expr::Unary { op: UnaryOp::Not, expr: innermost } = inner.as_ref() {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr: inner,
+        } => {
+            if let Expr::Unary {
+                op: UnaryOp::Not,
+                expr: innermost,
+            } = inner.as_ref()
+            {
                 return Transformed::Yes((**innermost).clone());
             }
             Transformed::No(expr)
@@ -87,7 +106,11 @@ fn simplify_node(expr: Expr) -> Transformed<Expr> {
         // x + 0 -> x (always valid for integers: NULL + 0 is still NULL,
         // and this rewrite doesn't change that — it just stops computing
         // it).
-        Expr::Binary { left, op: BinaryOp::Add, right } => {
+        Expr::Binary {
+            left,
+            op: BinaryOp::Add,
+            right,
+        } => {
             if let Expr::Literal(Value::Int64(0)) = right.as_ref() {
                 return Transformed::Yes((**left).clone());
             }
@@ -97,7 +120,11 @@ fn simplify_node(expr: Expr) -> Transformed<Expr> {
             Transformed::No(expr)
         }
         // x * 1 -> x (always valid, same reasoning as x + 0).
-        Expr::Binary { left, op: BinaryOp::Mul, right } => {
+        Expr::Binary {
+            left,
+            op: BinaryOp::Mul,
+            right,
+        } => {
             if let Expr::Literal(Value::Int64(1)) = right.as_ref() {
                 return Transformed::Yes((**left).clone());
             }
@@ -118,14 +145,22 @@ fn simplify_node(expr: Expr) -> Transformed<Expr> {
             Transformed::No(expr)
         }
         // x = x -> true, only if x is non-nullable: NULL = NULL is NULL.
-        Expr::Binary { left, op: BinaryOp::Eq, right } => {
+        Expr::Binary {
+            left,
+            op: BinaryOp::Eq,
+            right,
+        } => {
             if exprs_equal(left, right) && !left.nullable() {
                 return Transformed::Yes(Expr::Literal(Value::Boolean(true)));
             }
             Transformed::No(expr)
         }
         // x - x -> 0, only if x is non-nullable.
-        Expr::Binary { left, op: BinaryOp::Sub, right } => {
+        Expr::Binary {
+            left,
+            op: BinaryOp::Sub,
+            right,
+        } => {
             if exprs_equal(left, right) && !left.nullable() {
                 return Transformed::Yes(Expr::Literal(Value::Int64(0)));
             }

@@ -56,7 +56,11 @@ impl OptimizerRule for PredicatePushdown {
         ApplyOrder::BottomUp
     }
 
-    fn apply(&self, plan: LogicalPlan, _ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>> {
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        _ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>> {
         let LogicalPlan::Filter { input, predicate } = plan else {
             return Ok(Transformed::No(plan));
         };
@@ -66,7 +70,10 @@ impl OptimizerRule for PredicatePushdown {
             LogicalPlan::Projection { .. } => push_through_projection(input, predicate),
             LogicalPlan::Join { .. } => push_through_join(input, predicate),
             LogicalPlan::Aggregate { .. } => push_through_aggregate(input, predicate),
-            LogicalPlan::Sort { input: sort_input, exprs } => {
+            LogicalPlan::Sort {
+                input: sort_input,
+                exprs,
+            } => {
                 // Filtering doesn't change row order, only which rows
                 // exist — always safe, and reduces the number of rows Sort
                 // has to touch.
@@ -93,7 +100,14 @@ impl OptimizerRule for PredicatePushdown {
 /// above the scan unchanged, since Phase 2's scan executors don't apply
 /// `filters` themselves (see the module doc comment).
 fn push_into_scan(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Transformed<LogicalPlan>> {
-    let LogicalPlan::TableScan { table_name, source, projection, filters, schema } = input.as_ref() else {
+    let LogicalPlan::TableScan {
+        table_name,
+        source,
+        projection,
+        filters,
+        schema,
+    } = input.as_ref()
+    else {
         unreachable!("caller matched TableScan");
     };
     let new_conjuncts: Vec<Expr> = flatten_conjuncts(predicate.clone())
@@ -123,8 +137,16 @@ fn push_into_scan(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Transforme
 /// don't need the projection's computation to have happened yet. Any
 /// conjunct referencing a computed output column stays above the
 /// projection, unpushed.
-fn push_through_projection(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Transformed<LogicalPlan>> {
-    let LogicalPlan::Projection { input: proj_input, exprs, schema } = input.as_ref() else {
+fn push_through_projection(
+    input: Arc<LogicalPlan>,
+    predicate: Expr,
+) -> Result<Transformed<LogicalPlan>> {
+    let LogicalPlan::Projection {
+        input: proj_input,
+        exprs,
+        schema,
+    } = input.as_ref()
+    else {
         unreachable!("caller matched Projection");
     };
 
@@ -139,7 +161,10 @@ fn push_through_projection(input: Arc<LogicalPlan>, predicate: Expr) -> Result<T
     }
 
     if pushable.is_empty() {
-        return Ok(Transformed::No(LogicalPlan::Filter { input, predicate: rebuild_conjuncts(residual) }));
+        return Ok(Transformed::No(LogicalPlan::Filter {
+            input,
+            predicate: rebuild_conjuncts(residual),
+        }));
     }
 
     let new_proj_input = Arc::new(LogicalPlan::Filter {
@@ -184,7 +209,11 @@ fn rewrite_columns(expr: Expr, f: &impl Fn(usize) -> usize) -> Option<Expr> {
     use crate::optimizer::tree_node::TreeNode;
     expr.transform_up(&mut |e| {
         Ok(match e {
-            Expr::Column { index, data_type, nullable } => Transformed::Yes(Expr::Column {
+            Expr::Column {
+                index,
+                data_type,
+                nullable,
+            } => Transformed::Yes(Expr::Column {
                 index: f(index),
                 data_type,
                 nullable,
@@ -197,7 +226,15 @@ fn rewrite_columns(expr: Expr, f: &impl Fn(usize) -> usize) -> Option<Expr> {
 }
 
 fn push_through_join(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Transformed<LogicalPlan>> {
-    let LogicalPlan::Join { left, right, on, filter, join_type, schema } = input.as_ref() else {
+    let LogicalPlan::Join {
+        left,
+        right,
+        on,
+        filter,
+        join_type,
+        schema,
+    } = input.as_ref()
+    else {
         unreachable!("caller matched Join");
     };
     if *join_type == JoinType::Full {
@@ -232,20 +269,25 @@ fn push_through_join(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Transfo
             // Join.filter is applied before null-padding but a mixed
             // conjunct on an outer join was written expecting to see the
             // padded result).
-            (true, true, JoinType::Inner) => match split_equi_join_conjunct(&conjunct, left_width) {
-                Some(pair) => promote_to_on.push(pair),
-                // Not a promotable equi-join edge: keep it as a residual
-                // join filter (evaluated against the combined schema,
-                // which is exactly what `Join.filter` already is for an
-                // Inner join).
-                None => residual.push(conjunct),
-            },
+            (true, true, JoinType::Inner) => {
+                match split_equi_join_conjunct(&conjunct, left_width) {
+                    Some(pair) => promote_to_on.push(pair),
+                    // Not a promotable equi-join edge: keep it as a residual
+                    // join filter (evaluated against the combined schema,
+                    // which is exactly what `Join.filter` already is for an
+                    // Inner join).
+                    None => residual.push(conjunct),
+                }
+            }
             _ => residual.push(conjunct),
         }
     }
 
     if push_left.is_empty() && push_right.is_empty() && promote_to_on.is_empty() {
-        return Ok(Transformed::No(LogicalPlan::Filter { input, predicate: rebuild_conjuncts(residual) }));
+        return Ok(Transformed::No(LogicalPlan::Filter {
+            input,
+            predicate: rebuild_conjuncts(residual),
+        }));
     }
 
     let new_left = if push_left.is_empty() {
@@ -314,8 +356,17 @@ fn push_through_join(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Transfo
 /// expression is itself a bare `Column`. Conjuncts touching any aggregate
 /// output stay above, unpushed (`Aggregate` outputs don't exist until the
 /// aggregation runs).
-fn push_through_aggregate(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Transformed<LogicalPlan>> {
-    let LogicalPlan::Aggregate { input: agg_input, group_expr, aggr_expr, schema } = input.as_ref() else {
+fn push_through_aggregate(
+    input: Arc<LogicalPlan>,
+    predicate: Expr,
+) -> Result<Transformed<LogicalPlan>> {
+    let LogicalPlan::Aggregate {
+        input: agg_input,
+        group_expr,
+        aggr_expr,
+        schema,
+    } = input.as_ref()
+    else {
         unreachable!("caller matched Aggregate");
     };
 
@@ -325,7 +376,11 @@ fn push_through_aggregate(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Tr
     for conjunct in conjuncts {
         let cols = referenced_columns(&conjunct);
         let all_group_cols = cols.iter().all(|&c| c < group_expr.len());
-        if all_group_cols && cols.iter().all(|&c| matches!(group_expr[c], Expr::Column { .. })) {
+        if all_group_cols
+            && cols
+                .iter()
+                .all(|&c| matches!(group_expr[c], Expr::Column { .. }))
+        {
             if let Some(rewritten) = rewrite_columns(conjunct.clone(), &|i| match group_expr[i] {
                 Expr::Column { index, .. } => index,
                 _ => unreachable!("checked above"),
@@ -338,7 +393,10 @@ fn push_through_aggregate(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Tr
     }
 
     if pushable.is_empty() {
-        return Ok(Transformed::No(LogicalPlan::Filter { input, predicate: rebuild_conjuncts(residual) }));
+        return Ok(Transformed::No(LogicalPlan::Filter {
+            input,
+            predicate: rebuild_conjuncts(residual),
+        }));
     }
 
     let new_agg_input = Arc::new(LogicalPlan::Filter {
@@ -377,12 +435,10 @@ mod tests {
     }
 
     fn joined_schema() -> SchemaRef {
-        Arc::new(
-            Schema::new_allow_duplicate_names(vec![
-                Field::new("l", DataType::Int64, false),
-                Field::new("r", DataType::Int64, false),
-            ]),
-        )
+        Arc::new(Schema::new_allow_duplicate_names(vec![
+            Field::new("l", DataType::Int64, false),
+            Field::new("r", DataType::Int64, false),
+        ]))
     }
 
     fn col(i: usize) -> Expr {
@@ -394,7 +450,8 @@ mod tests {
     }
 
     fn scan(name: &str) -> Arc<LogicalPlan> {
-        LogicalPlanBuilder::scan(name, Arc::new(MemoryTableSource::new(schema(name), vec![]))).build()
+        LogicalPlanBuilder::scan(name, Arc::new(MemoryTableSource::new(schema(name), vec![])))
+            .build()
     }
 
     fn join(join_type: JoinType) -> LogicalPlan {
@@ -462,14 +519,26 @@ mod tests {
             predicate: predicate.clone(),
         };
         let result = PredicatePushdown.apply(plan, &NoStatistics).unwrap();
-        assert!(!result.is_yes(), "must not push a right-side predicate through a LEFT JOIN");
+        assert!(
+            !result.is_yes(),
+            "must not push a right-side predicate through a LEFT JOIN"
+        );
         match result.into_inner() {
-            LogicalPlan::Filter { input, predicate: p } => {
+            LogicalPlan::Filter {
+                input,
+                predicate: p,
+            } => {
                 assert_eq!(p, predicate);
                 assert!(matches!(input.as_ref(), LogicalPlan::Join { .. }));
                 if let LogicalPlan::Join { right, filter, .. } = input.as_ref() {
-                    assert!(matches!(right.as_ref(), LogicalPlan::TableScan { .. }), "right side must stay unfiltered");
-                    assert!(filter.is_none(), "must not become part of Join.filter either");
+                    assert!(
+                        matches!(right.as_ref(), LogicalPlan::TableScan { .. }),
+                        "right side must stay unfiltered"
+                    );
+                    assert!(
+                        filter.is_none(),
+                        "must not become part of Join.filter either"
+                    );
                 }
             }
             other => panic!("expected Filter, got {other:?}"),

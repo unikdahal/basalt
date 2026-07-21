@@ -33,7 +33,11 @@ impl OptimizerRule for EliminateCrossJoin {
         ApplyOrder::BottomUp
     }
 
-    fn apply(&self, plan: LogicalPlan, _ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>> {
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        _ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>> {
         let LogicalPlan::Filter { input, predicate } = plan else {
             return Ok(Transformed::No(plan));
         };
@@ -106,12 +110,10 @@ mod tests {
     }
 
     fn joined_schema() -> SchemaRef {
-        Arc::new(
-            Schema::new_allow_duplicate_names(vec![
-                Field::new("l", DataType::Int64, false),
-                Field::new("r", DataType::Int64, false),
-            ]),
-        )
+        Arc::new(Schema::new_allow_duplicate_names(vec![
+            Field::new("l", DataType::Int64, false),
+            Field::new("r", DataType::Int64, false),
+        ]))
     }
 
     fn col(i: usize) -> Expr {
@@ -123,8 +125,12 @@ mod tests {
     }
 
     fn cross_join() -> LogicalPlan {
-        let left = LogicalPlanBuilder::scan("l", Arc::new(MemoryTableSource::new(schema("l"), vec![]))).build();
-        let right = LogicalPlanBuilder::scan("r", Arc::new(MemoryTableSource::new(schema("r"), vec![]))).build();
+        let left =
+            LogicalPlanBuilder::scan("l", Arc::new(MemoryTableSource::new(schema("l"), vec![])))
+                .build();
+        let right =
+            LogicalPlanBuilder::scan("r", Arc::new(MemoryTableSource::new(schema("r"), vec![])))
+                .build();
         LogicalPlan::Join {
             left,
             right,

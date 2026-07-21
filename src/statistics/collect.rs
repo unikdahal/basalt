@@ -49,13 +49,16 @@ pub trait StatisticsProvider {
 /// types today — a `Utf8`/`Boolean` column still gets NDV, min/max, and an
 /// MCV list, just no histogram.
 pub fn analyze(source: &dyn TableSource, sample: Option<f64>) -> Result<TableStatistics> {
-    let memory_source = source.as_any().downcast_ref::<MemoryTableSource>().ok_or_else(|| {
-        crate::error::BasaltError::Internal(
+    let memory_source = source
+        .as_any()
+        .downcast_ref::<MemoryTableSource>()
+        .ok_or_else(|| {
+            crate::error::BasaltError::Internal(
             "ANALYZE requires a MemoryTableSource in Phase 3 core (no generic TableSource scan \
              API exists yet)"
                 .to_string(),
         )
-    })?;
+        })?;
 
     let schema = source.schema();
     let num_columns = schema.fields().len();
@@ -64,7 +67,15 @@ pub fn analyze(source: &dyn TableSource, sample: Option<f64>) -> Result<TableSta
     }
 
     let batch = concat_batches(memory_source.batches())?;
-    let precision_kind = |exact: bool| move |v| if exact { Precision::Exact(v) } else { Precision::Inexact(v) };
+    let precision_kind = |exact: bool| {
+        move |v| {
+            if exact {
+                Precision::Exact(v)
+            } else {
+                Precision::Inexact(v)
+            }
+        }
+    };
 
     let mut column_statistics = Vec::with_capacity(num_columns);
     let mut total_rows = 0usize;
@@ -74,7 +85,10 @@ pub fn analyze(source: &dyn TableSource, sample: Option<f64>) -> Result<TableSta
         })?;
         let (sampled_column, exact) = maybe_sample(column.as_ref(), sample)?;
         total_rows = total_rows.max(sampled_column.len());
-        column_statistics.push(analyze_column(sampled_column.as_ref(), precision_kind(exact))?);
+        column_statistics.push(analyze_column(
+            sampled_column.as_ref(),
+            precision_kind(exact),
+        )?);
     }
 
     Ok(TableStatistics {
@@ -96,7 +110,8 @@ fn maybe_sample(
         return Ok((column.slice(0, column.len()), fraction >= 1.0));
     }
     let stride = (1.0 / fraction).round().max(1.0) as usize;
-    let mut indices = crate::compute::index::UInt32Builder::with_capacity(column.len() / stride + 1);
+    let mut indices =
+        crate::compute::index::UInt32Builder::with_capacity(column.len() / stride + 1);
     let mut i = 0usize;
     while i < column.len() {
         indices.append_value(i as u32);
@@ -274,7 +289,10 @@ fn build_mcv(column: &dyn Array, top_n: usize) -> Result<Option<MostCommonValues
 
     let values = pairs.iter().map(|(v, _)| v.clone()).collect();
     let frequencies = pairs.iter().map(|(_, c)| *c as f64 / len as f64).collect();
-    Ok(Some(MostCommonValues { values, frequencies }))
+    Ok(Some(MostCommonValues {
+        values,
+        frequencies,
+    }))
 }
 
 fn scalar_at(column: &dyn Array, i: usize) -> Result<ScalarValue> {
@@ -303,9 +321,7 @@ fn concat_batches(batches: &[ColumnarBatch]) -> Result<ColumnarBatch> {
             .map(|b| b.column(col_idx).cloned())
             .collect::<Option<_>>()
             .ok_or_else(|| {
-                crate::error::BasaltError::Internal(format!(
-                    "column index {col_idx} out of bounds"
-                ))
+                crate::error::BasaltError::Internal(format!("column index {col_idx} out of bounds"))
             })?;
         columns.push(crate::compute::concat::concat(&arrays)?);
     }
@@ -351,8 +367,12 @@ pub fn statistics_from_parquet(path: impl AsRef<Path>) -> Result<TableStatistics
         .map(|col| ColumnStatistics {
             null_count: Precision::Exact(null_counts[col]),
             distinct_count: Precision::Absent,
-            min_value: mins[col].clone().map_or(Precision::Absent, Precision::Exact),
-            max_value: maxes[col].clone().map_or(Precision::Absent, Precision::Exact),
+            min_value: mins[col]
+                .clone()
+                .map_or(Precision::Absent, Precision::Exact),
+            max_value: maxes[col]
+                .clone()
+                .map_or(Precision::Absent, Precision::Exact),
             histogram: None,
             mcv: None,
         })
@@ -450,10 +470,16 @@ mod tests {
         let src = source(&(0..1000).collect::<Vec<_>>());
         let stats = analyze(&src, None).unwrap();
         assert_eq!(stats.num_rows, Precision::Exact(1000));
-        let ndv = stats.column_statistics[0].distinct_count.get_value().copied();
+        let ndv = stats.column_statistics[0]
+            .distinct_count
+            .get_value()
+            .copied();
         assert!(ndv.is_some());
         let ndv = ndv.unwrap();
-        assert!((900..=1100).contains(&ndv), "NDV estimate {ndv} too far from 1000");
+        assert!(
+            (900..=1100).contains(&ndv),
+            "NDV estimate {ndv} too far from 1000"
+        );
     }
 
     #[test]

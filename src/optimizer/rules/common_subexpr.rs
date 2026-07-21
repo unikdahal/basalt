@@ -38,17 +38,34 @@ impl OptimizerRule for CommonSubexprEliminate {
         ApplyOrder::BottomUp
     }
 
-    fn apply(&self, plan: LogicalPlan, _ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>> {
-        let LogicalPlan::Projection { input, exprs, schema } = plan else {
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        _ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>> {
+        let LogicalPlan::Projection {
+            input,
+            exprs,
+            schema,
+        } = plan
+        else {
             return Ok(Transformed::No(plan));
         };
 
         let Some(repeated) = find_most_repeated_subexpr(&exprs) else {
-            return Ok(Transformed::No(LogicalPlan::Projection { input, exprs, schema }));
+            return Ok(Transformed::No(LogicalPlan::Projection {
+                input,
+                exprs,
+                schema,
+            }));
         };
 
         let Ok(data_type) = repeated.data_type() else {
-            return Ok(Transformed::No(LogicalPlan::Projection { input, exprs, schema }));
+            return Ok(Transformed::No(LogicalPlan::Projection {
+                input,
+                exprs,
+                schema,
+            }));
         };
         let new_col_index = input.schema().fields().len();
         let nullable = repeated.nullable();
@@ -60,7 +77,11 @@ impl OptimizerRule for CommonSubexprEliminate {
         let lower_exprs: Vec<Expr> = (0..input.schema().fields().len())
             .map(|i| {
                 let f = &input.schema().fields()[i];
-                Expr::Column { index: i, data_type: f.data_type, nullable: f.nullable }
+                Expr::Column {
+                    index: i,
+                    data_type: f.data_type,
+                    nullable: f.nullable,
+                }
             })
             .chain(std::iter::once(repeated.clone()))
             .collect();
@@ -70,7 +91,11 @@ impl OptimizerRule for CommonSubexprEliminate {
             schema: lower_schema,
         };
 
-        let replacement = Expr::Column { index: new_col_index, data_type, nullable };
+        let replacement = Expr::Column {
+            index: new_col_index,
+            data_type,
+            nullable,
+        };
         let rewritten_exprs = exprs
             .into_iter()
             .map(|e| replace_subexpr(e, &repeated, &replacement))
@@ -213,7 +238,9 @@ mod tests {
                 // hoisted column (index 2, after a=0, b=1).
                 assert_eq!(exprs[0], col(2));
                 match &input.as_ref() {
-                    LogicalPlan::Projection { exprs: lower_exprs, .. } => {
+                    LogicalPlan::Projection {
+                        exprs: lower_exprs, ..
+                    } => {
                         assert_eq!(lower_exprs.len(), 3);
                         assert_eq!(lower_exprs[2], a_plus_b());
                     }

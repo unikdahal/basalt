@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::graph::{full_set, singleton, JoinGraph, JoinEdge, RelationSet};
+use super::graph::{full_set, singleton, JoinEdge, JoinGraph, RelationSet};
 use crate::error::{BasaltError, Result};
 use crate::expr::expr::Expr;
 use crate::logical_plan::plan::{JoinType, LogicalPlan};
@@ -76,7 +76,9 @@ impl<'a> DpJoinOptimizer<'a> {
     pub fn optimize(&self) -> Result<PlanCandidate> {
         let n = self.graph.num_relations();
         if n == 0 {
-            return Err(BasaltError::Internal("cannot join zero relations".to_string()));
+            return Err(BasaltError::Internal(
+                "cannot join zero relations".to_string(),
+            ));
         }
         let mut memo: HashMap<RelationSet, PlanCandidate> = HashMap::new();
         for i in 0..n {
@@ -110,7 +112,11 @@ impl<'a> DpJoinOptimizer<'a> {
         }
     }
 
-    fn best_split(&self, memo: &HashMap<RelationSet, PlanCandidate>, s: RelationSet) -> Option<PlanCandidate> {
+    fn best_split(
+        &self,
+        memo: &HashMap<RelationSet, PlanCandidate>,
+        s: RelationSet,
+    ) -> Option<PlanCandidate> {
         let mut best: Option<PlanCandidate> = None;
         for s1 in JoinGraph::sub_masks(s) {
             let s2 = s & !s1;
@@ -124,9 +130,9 @@ impl<'a> DpJoinOptimizer<'a> {
                 continue;
             };
             if let Ok(candidate) = self.build_join(c1, c2) {
-                let better = best
-                    .as_ref()
-                    .is_none_or(|b| candidate.cost.total(self.weights) < b.cost.total(self.weights));
+                let better = best.as_ref().is_none_or(|b| {
+                    candidate.cost.total(self.weights) < b.cost.total(self.weights)
+                });
                 if better {
                     best = Some(candidate);
                 }
@@ -137,14 +143,28 @@ impl<'a> DpJoinOptimizer<'a> {
 
     /// Builds the `PlanCandidate` for joining `left`'s and `right`'s
     /// subsets on every edge the graph has between them.
-    pub(crate) fn build_join(&self, left: &PlanCandidate, right: &PlanCandidate) -> Result<PlanCandidate> {
-        let left_set = left.column_order.iter().map(|&(r, _)| r).collect::<std::collections::HashSet<_>>();
-        let right_set = right.column_order.iter().map(|&(r, _)| r).collect::<std::collections::HashSet<_>>();
+    pub(crate) fn build_join(
+        &self,
+        left: &PlanCandidate,
+        right: &PlanCandidate,
+    ) -> Result<PlanCandidate> {
+        let left_set = left
+            .column_order
+            .iter()
+            .map(|&(r, _)| r)
+            .collect::<std::collections::HashSet<_>>();
+        let right_set = right
+            .column_order
+            .iter()
+            .map(|&(r, _)| r)
+            .collect::<std::collections::HashSet<_>>();
         let left_mask = left_set.iter().fold(0u64, |acc, &r| acc | singleton(r));
         let right_mask = right_set.iter().fold(0u64, |acc, &r| acc | singleton(r));
         let edges = self.graph.edges_between(left_mask, right_mask);
         if edges.is_empty() {
-            return Err(BasaltError::Internal("no join edge between these subsets".to_string()));
+            return Err(BasaltError::Internal(
+                "no join edge between these subsets".to_string(),
+            ));
         }
 
         let on: Vec<(Expr, Expr)> = edges
@@ -169,7 +189,12 @@ impl<'a> DpJoinOptimizer<'a> {
             total_byte_size: Precision::Absent,
             column_statistics: right.column_statistics.clone(),
         };
-        let cardinality = join_cardinality(&left_stats, &right_stats, &on_local_indices, JoinType::Inner);
+        let cardinality = join_cardinality(
+            &left_stats,
+            &right_stats,
+            &on_local_indices,
+            JoinType::Inner,
+        );
 
         // A byte-width-per-row estimate isn't tracked per column in this
         // engine yet; 8.0 bytes/column is a documented placeholder — cost
@@ -204,30 +229,63 @@ impl<'a> DpJoinOptimizer<'a> {
             schema,
         });
 
-        Ok(PlanCandidate { plan, cost, cardinality, column_order, column_statistics })
+        Ok(PlanCandidate {
+            plan,
+            cost,
+            cardinality,
+            column_order,
+            column_statistics,
+        })
     }
 
     /// Maps a graph edge's `(relation, column)` endpoints to `Expr::Column`
     /// nodes indexed relative to `left`'s and `right`'s own local schemas
     /// (what `LogicalPlan::Join.on` expects), pulling the real
     /// `DataType`/nullability from that relation's actual schema.
-    fn edge_to_columns(&self, edge: &JoinEdge, left: &PlanCandidate, right: &PlanCandidate) -> Result<(Expr, Expr)> {
+    fn edge_to_columns(
+        &self,
+        edge: &JoinEdge,
+        left: &PlanCandidate,
+        right: &PlanCandidate,
+    ) -> Result<(Expr, Expr)> {
         let left_pos = left
             .column_order
             .iter()
             .position(|&(r, c)| r == edge.left_relation && c == edge.left_column)
-            .ok_or_else(|| BasaltError::Internal("join edge references a column not in the left subset".to_string()))?;
+            .ok_or_else(|| {
+                BasaltError::Internal(
+                    "join edge references a column not in the left subset".to_string(),
+                )
+            })?;
         let right_pos = right
             .column_order
             .iter()
             .position(|&(r, c)| r == edge.right_relation && c == edge.right_column)
-            .ok_or_else(|| BasaltError::Internal("join edge references a column not in the right subset".to_string()))?;
+            .ok_or_else(|| {
+                BasaltError::Internal(
+                    "join edge references a column not in the right subset".to_string(),
+                )
+            })?;
 
-        let left_field = &self.graph.relations[edge.left_relation].plan.schema().fields()[edge.left_column];
-        let right_field = &self.graph.relations[edge.right_relation].plan.schema().fields()[edge.right_column];
+        let left_field = &self.graph.relations[edge.left_relation]
+            .plan
+            .schema()
+            .fields()[edge.left_column];
+        let right_field = &self.graph.relations[edge.right_relation]
+            .plan
+            .schema()
+            .fields()[edge.right_column];
         Ok((
-            Expr::Column { index: left_pos, data_type: left_field.data_type, nullable: left_field.nullable },
-            Expr::Column { index: right_pos, data_type: right_field.data_type, nullable: right_field.nullable },
+            Expr::Column {
+                index: left_pos,
+                data_type: left_field.data_type,
+                nullable: left_field.nullable,
+            },
+            Expr::Column {
+                index: right_pos,
+                data_type: right_field.data_type,
+                nullable: right_field.nullable,
+            },
         ))
     }
 }
@@ -290,7 +348,12 @@ pub fn enumerate_connected_subsets(graph: &JoinGraph) -> Vec<RelationSet> {
     result
 }
 
-fn enumerate_csg_rec(graph: &JoinGraph, s: RelationSet, forbidden: RelationSet, result: &mut Vec<RelationSet>) {
+fn enumerate_csg_rec(
+    graph: &JoinGraph,
+    s: RelationSet,
+    forbidden: RelationSet,
+    result: &mut Vec<RelationSet>,
+) {
     let frontier = graph.neighbors(s) & !forbidden;
     if frontier == 0 {
         return;
@@ -310,7 +373,9 @@ pub struct DpccpJoinOptimizer<'a> {
 
 impl<'a> DpccpJoinOptimizer<'a> {
     pub fn new(graph: &'a JoinGraph, weights: &'a CostWeights) -> Self {
-        DpccpJoinOptimizer { inner: DpJoinOptimizer::new(graph, weights) }
+        DpccpJoinOptimizer {
+            inner: DpJoinOptimizer::new(graph, weights),
+        }
     }
 
     /// # Errors
@@ -320,7 +385,9 @@ impl<'a> DpccpJoinOptimizer<'a> {
         let graph = self.inner.graph;
         let n = graph.num_relations();
         if n == 0 {
-            return Err(BasaltError::Internal("cannot join zero relations".to_string()));
+            return Err(BasaltError::Internal(
+                "cannot join zero relations".to_string(),
+            ));
         }
 
         let mut connected = enumerate_connected_subsets(graph);
@@ -353,9 +420,9 @@ impl<'a> DpccpJoinOptimizer<'a> {
                 }
                 let (c1, c2) = (&memo[&s1], &memo[&s2]);
                 if let Ok(candidate) = self.inner.build_join(c1, c2) {
-                    let better = best
-                        .as_ref()
-                        .is_none_or(|b| candidate.cost.total(self.inner.weights) < b.cost.total(self.inner.weights));
+                    let better = best.as_ref().is_none_or(|b| {
+                        candidate.cost.total(self.inner.weights) < b.cost.total(self.inner.weights)
+                    });
                     if better {
                         best = Some(candidate);
                     }
@@ -388,20 +455,38 @@ mod tests {
     }
 
     fn relation(name: &str, num_rows: usize, ndv: usize) -> RelationNode {
-        let plan = LogicalPlanBuilder::scan(name, Arc::new(MemoryTableSource::new(schema(name), vec![])))
-            .build();
+        let plan =
+            LogicalPlanBuilder::scan(name, Arc::new(MemoryTableSource::new(schema(name), vec![])))
+                .build();
         let mut stats = TableStatistics::unknown(1);
         stats.num_rows = Precision::Exact(num_rows);
         stats.column_statistics[0].distinct_count = Precision::Exact(ndv);
-        RelationNode { plan, stats: Arc::new(stats) }
+        RelationNode {
+            plan,
+            stats: Arc::new(stats),
+        }
     }
 
     fn chain_graph() -> JoinGraph {
         // a -- b -- c, a chain of 3 relations.
-        let relations = vec![relation("a", 1000, 100), relation("b", 100, 100), relation("c", 10000, 500)];
+        let relations = vec![
+            relation("a", 1000, 100),
+            relation("b", 100, 100),
+            relation("c", 10000, 500),
+        ];
         let edges = vec![
-            JoinEdge { left_relation: 0, left_column: 0, right_relation: 1, right_column: 0 },
-            JoinEdge { left_relation: 1, left_column: 0, right_relation: 2, right_column: 0 },
+            JoinEdge {
+                left_relation: 0,
+                left_column: 0,
+                right_relation: 1,
+                right_column: 0,
+            },
+            JoinEdge {
+                left_relation: 1,
+                left_column: 0,
+                right_relation: 2,
+                right_column: 0,
+            },
         ];
         JoinGraph::new(relations, edges)
     }
@@ -409,20 +494,34 @@ mod tests {
     /// Relation 0 connected to every other relation, none of the others
     /// connected to each other — a star.
     fn star_graph(n: usize) -> JoinGraph {
-        let relations: Vec<_> = (0..n).map(|i| relation(&format!("t{i}"), 100 * (i + 1), 20 + i)).collect();
+        let relations: Vec<_> = (0..n)
+            .map(|i| relation(&format!("t{i}"), 100 * (i + 1), 20 + i))
+            .collect();
         let edges: Vec<_> = (1..n)
-            .map(|i| JoinEdge { left_relation: 0, left_column: 0, right_relation: i, right_column: 0 })
+            .map(|i| JoinEdge {
+                left_relation: 0,
+                left_column: 0,
+                right_relation: i,
+                right_column: 0,
+            })
             .collect();
         JoinGraph::new(relations, edges)
     }
 
     /// Every relation connected to every other — a clique.
     fn clique_graph(n: usize) -> JoinGraph {
-        let relations: Vec<_> = (0..n).map(|i| relation(&format!("t{i}"), 50 * (i + 1), 10 + i)).collect();
+        let relations: Vec<_> = (0..n)
+            .map(|i| relation(&format!("t{i}"), 50 * (i + 1), 10 + i))
+            .collect();
         let mut edges = Vec::new();
         for i in 0..n {
             for j in (i + 1)..n {
-                edges.push(JoinEdge { left_relation: i, left_column: 0, right_relation: j, right_column: 0 });
+                edges.push(JoinEdge {
+                    left_relation: i,
+                    left_column: 0,
+                    right_relation: j,
+                    right_column: 0,
+                });
             }
         }
         JoinGraph::new(relations, edges)
@@ -450,8 +549,15 @@ mod tests {
         let graph = star_graph(4);
         let weights = CostWeights::defaults();
         let dpsize = DpJoinOptimizer::new(&graph, &weights).optimize().unwrap();
-        let dpccp = DpccpJoinOptimizer::new(&graph, &weights).optimize().unwrap();
-        assert!((dpsize.cost.cpu - dpccp.cost.cpu).abs() < 1e-6, "star graph cpu: DPccp {} vs DPsize {}", dpccp.cost.cpu, dpsize.cost.cpu);
+        let dpccp = DpccpJoinOptimizer::new(&graph, &weights)
+            .optimize()
+            .unwrap();
+        assert!(
+            (dpsize.cost.cpu - dpccp.cost.cpu).abs() < 1e-6,
+            "star graph cpu: DPccp {} vs DPsize {}",
+            dpccp.cost.cpu,
+            dpsize.cost.cpu
+        );
         assert_eq!(dpsize.cardinality, dpccp.cardinality);
     }
 
@@ -460,8 +566,15 @@ mod tests {
         let graph = clique_graph(4);
         let weights = CostWeights::defaults();
         let dpsize = DpJoinOptimizer::new(&graph, &weights).optimize().unwrap();
-        let dpccp = DpccpJoinOptimizer::new(&graph, &weights).optimize().unwrap();
-        assert!((dpsize.cost.cpu - dpccp.cost.cpu).abs() < 1e-6, "clique graph cpu: DPccp {} vs DPsize {}", dpccp.cost.cpu, dpsize.cost.cpu);
+        let dpccp = DpccpJoinOptimizer::new(&graph, &weights)
+            .optimize()
+            .unwrap();
+        assert!(
+            (dpsize.cost.cpu - dpccp.cost.cpu).abs() < 1e-6,
+            "clique graph cpu: DPccp {} vs DPsize {}",
+            dpccp.cost.cpu,
+            dpsize.cost.cpu
+        );
         assert_eq!(dpsize.cardinality, dpccp.cardinality);
     }
 
@@ -488,7 +601,10 @@ mod tests {
         let graph = JoinGraph::new(relations, vec![]);
         let weights = CostWeights::defaults();
         let result = DpJoinOptimizer::new(&graph, &weights).optimize().unwrap();
-        assert!(matches!(result.plan.as_ref(), LogicalPlan::TableScan { .. }));
+        assert!(matches!(
+            result.plan.as_ref(),
+            LogicalPlan::TableScan { .. }
+        ));
     }
 
     /// The brute-force oracle: for a small graph, enumerate every valid
@@ -502,7 +618,11 @@ mod tests {
     fn dp_finds_the_same_optimum_as_brute_force_enumeration() {
         let graph = chain_graph();
         let weights = CostWeights::defaults();
-        let dp_cost = DpJoinOptimizer::new(&graph, &weights).optimize().unwrap().cost.total(&weights);
+        let dp_cost = DpJoinOptimizer::new(&graph, &weights)
+            .optimize()
+            .unwrap()
+            .cost
+            .total(&weights);
         let brute_force_cost = brute_force_best_cost(&graph, &weights);
         assert!(
             (dp_cost - brute_force_cost).abs() < 1e-6,
@@ -520,7 +640,10 @@ mod tests {
         // Every actually-connected subset must appear: {a}, {b}, {c},
         // {a,b}, {b,c}, {a,b,c}.
         for expected in [0b001, 0b010, 0b100, 0b011, 0b110, 0b111] {
-            assert!(connected.contains(&expected), "missing connected subset {expected:03b}");
+            assert!(
+                connected.contains(&expected),
+                "missing connected subset {expected:03b}"
+            );
         }
     }
 
@@ -528,8 +651,16 @@ mod tests {
     fn dpccp_matches_dpsize_on_the_same_graph() {
         let graph = chain_graph();
         let weights = CostWeights::defaults();
-        let dpsize_cost = DpJoinOptimizer::new(&graph, &weights).optimize().unwrap().cost.total(&weights);
-        let dpccp_cost = DpccpJoinOptimizer::new(&graph, &weights).optimize().unwrap().cost.total(&weights);
+        let dpsize_cost = DpJoinOptimizer::new(&graph, &weights)
+            .optimize()
+            .unwrap()
+            .cost
+            .total(&weights);
+        let dpccp_cost = DpccpJoinOptimizer::new(&graph, &weights)
+            .optimize()
+            .unwrap()
+            .cost
+            .total(&weights);
         assert!(
             (dpsize_cost - dpccp_cost).abs() < 1e-6,
             "DPccp cost {dpccp_cost} should match DPsize's optimum {dpsize_cost}"
@@ -540,7 +671,11 @@ mod tests {
     fn dpccp_errors_on_a_disconnected_graph() {
         let relations = vec![
             crate::optimizer::join_order::graph::RelationNode {
-                plan: LogicalPlanBuilder::scan("a", Arc::new(MemoryTableSource::new(schema("a"), vec![]))).build(),
+                plan: LogicalPlanBuilder::scan(
+                    "a",
+                    Arc::new(MemoryTableSource::new(schema("a"), vec![])),
+                )
+                .build(),
                 stats: Arc::new({
                     let mut s = TableStatistics::unknown(1);
                     s.num_rows = Precision::Exact(10);
@@ -548,7 +683,11 @@ mod tests {
                 }),
             },
             crate::optimizer::join_order::graph::RelationNode {
-                plan: LogicalPlanBuilder::scan("b", Arc::new(MemoryTableSource::new(schema("b"), vec![]))).build(),
+                plan: LogicalPlanBuilder::scan(
+                    "b",
+                    Arc::new(MemoryTableSource::new(schema("b"), vec![])),
+                )
+                .build(),
                 stats: Arc::new({
                     let mut s = TableStatistics::unknown(1);
                     s.num_rows = Precision::Exact(10);
@@ -558,7 +697,9 @@ mod tests {
         ];
         let graph = JoinGraph::new(relations, vec![]);
         let weights = CostWeights::defaults();
-        assert!(DpccpJoinOptimizer::new(&graph, &weights).optimize().is_err());
+        assert!(DpccpJoinOptimizer::new(&graph, &weights)
+            .optimize()
+            .is_err());
     }
 
     /// Exhaustively tries every way to build up the full relation set via
@@ -588,13 +729,16 @@ mod tests {
                 if !graph.is_connected(s1, s2) {
                     continue;
                 }
-                let (Some(c1), Some(c2)) =
-                    (best_for(graph, weights, opt, s1, cache), best_for(graph, weights, opt, s2, cache))
-                else {
+                let (Some(c1), Some(c2)) = (
+                    best_for(graph, weights, opt, s1, cache),
+                    best_for(graph, weights, opt, s2, cache),
+                ) else {
                     continue;
                 };
                 if let Ok(candidate) = opt.build_join(&c1, &c2) {
-                    let better = best.as_ref().is_none_or(|b| candidate.cost.total(weights) < b.cost.total(weights));
+                    let better = best
+                        .as_ref()
+                        .is_none_or(|b| candidate.cost.total(weights) < b.cost.total(weights));
                     if better {
                         best = Some(candidate);
                     }
@@ -608,9 +752,15 @@ mod tests {
 
         let opt = DpJoinOptimizer::new(graph, weights);
         let mut cache = HashMap::new();
-        best_for(graph, weights, &opt, full_set(graph.num_relations()), &mut cache)
-            .expect("connected graph must have a valid join order")
-            .cost
-            .total(weights)
+        best_for(
+            graph,
+            weights,
+            &opt,
+            full_set(graph.num_relations()),
+            &mut cache,
+        )
+        .expect("connected graph must have a valid join order")
+        .cost
+        .total(weights)
     }
 }

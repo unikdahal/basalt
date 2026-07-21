@@ -14,17 +14,32 @@ use super::model::Cost;
 /// and pruning (i.e. the caller passes the bytes *after* those, not the
 /// full file size).
 pub fn scan_cost(bytes_read: f64, rows: f64) -> Cost {
-    Cost { io: bytes_read, cpu: rows, memory: 0.0, network: 0.0 }
+    Cost {
+        io: bytes_read,
+        cpu: rows,
+        memory: 0.0,
+        network: 0.0,
+    }
 }
 
 /// `input_rows * num_predicates * cpu`.
 pub fn filter_cost(input_rows: f64, num_predicates: f64) -> Cost {
-    Cost { io: 0.0, cpu: input_rows * num_predicates.max(1.0), memory: 0.0, network: 0.0 }
+    Cost {
+        io: 0.0,
+        cpu: input_rows * num_predicates.max(1.0),
+        memory: 0.0,
+        network: 0.0,
+    }
 }
 
 /// `input_rows * num_exprs * cpu`.
 pub fn projection_cost(input_rows: f64, num_exprs: f64) -> Cost {
-    Cost { io: 0.0, cpu: input_rows * num_exprs.max(1.0), memory: 0.0, network: 0.0 }
+    Cost {
+        io: 0.0,
+        cpu: input_rows * num_exprs.max(1.0),
+        memory: 0.0,
+        network: 0.0,
+    }
 }
 
 /// `build_rows (hash) + probe_rows (probe) + output_rows (materialize)`,
@@ -42,13 +57,23 @@ pub fn hash_join_cost(build_rows: f64, probe_rows: f64, output_rows: f64, row_wi
 /// enumerator only picks this when nothing else applies (no equi-join
 /// column available).
 pub fn nested_loop_join_cost(left_rows: f64, right_rows: f64) -> Cost {
-    Cost { io: 0.0, cpu: left_rows * right_rows, memory: 0.0, network: 0.0 }
+    Cost {
+        io: 0.0,
+        cpu: left_rows * right_rows,
+        memory: 0.0,
+        network: 0.0,
+    }
 }
 
 /// `input_rows (hash) + num_groups (finalize)`, memory
 /// `num_groups * state_width`.
 pub fn aggregate_cost(input_rows: f64, num_groups: f64, state_width: f64) -> Cost {
-    Cost { io: 0.0, cpu: input_rows + num_groups, memory: num_groups * state_width, network: 0.0 }
+    Cost {
+        io: 0.0,
+        cpu: input_rows + num_groups,
+        memory: num_groups * state_width,
+        network: 0.0,
+    }
 }
 
 /// `n log n * cpu`, plus a spill cost if `n * row_width` exceeds
@@ -73,7 +98,12 @@ pub fn sort_cost(n: f64, row_width: f64, memory_budget: f64) -> Cost {
             network: 0.0,
         }
     } else {
-        Cost { io: 0.0, cpu: compare_cost, memory: live_memory, network: 0.0 }
+        Cost {
+            io: 0.0,
+            cpu: compare_cost,
+            memory: live_memory,
+            network: 0.0,
+        }
     }
 }
 
@@ -82,7 +112,12 @@ pub fn sort_cost(n: f64, row_width: f64, memory_budget: f64) -> Cost {
 /// `ORDER BY ... LIMIT k` over a full `Sort` + `Limit`.
 pub fn topk_cost(n: f64, k: f64, row_width: f64) -> Cost {
     let k = k.max(1.0);
-    Cost { io: 0.0, cpu: n * k.log2().max(0.0), memory: k * row_width, network: 0.0 }
+    Cost {
+        io: 0.0,
+        cpu: n * k.log2().max(0.0),
+        memory: k * row_width,
+        network: 0.0,
+    }
 }
 
 /// Approximately free: `Limit` only takes the first few rows of its
@@ -102,7 +137,12 @@ mod tests {
         let width = 16.0;
         let sort = sort_cost(n, width, f64::INFINITY);
         let topk = topk_cost(n, k, width);
-        assert!(topk.cpu < sort.cpu, "TopK cpu ({}) should be far below Sort cpu ({})", topk.cpu, sort.cpu);
+        assert!(
+            topk.cpu < sort.cpu,
+            "TopK cpu ({}) should be far below Sort cpu ({})",
+            topk.cpu,
+            sort.cpu
+        );
         assert!(topk.memory < sort.memory);
     }
 
@@ -113,14 +153,20 @@ mod tests {
         let in_memory = sort_cost(n, width, f64::INFINITY);
         let spilled = sort_cost(n, width, 1_000_000.0); // 1MB budget
         assert_eq!(in_memory.io, 0.0);
-        assert!(spilled.io > 0.0, "a sort exceeding its memory budget must show nonzero I/O");
+        assert!(
+            spilled.io > 0.0,
+            "a sort exceeding its memory budget must show nonzero I/O"
+        );
     }
 
     #[test]
     fn nested_loop_join_is_quadratic() {
         let cost_100 = nested_loop_join_cost(100.0, 100.0);
         let cost_200 = nested_loop_join_cost(200.0, 200.0);
-        assert!((cost_200.cpu / cost_100.cpu - 4.0).abs() < 1e-9, "doubling both sides should quadruple cost");
+        assert!(
+            (cost_200.cpu / cost_100.cpu - 4.0).abs() < 1e-9,
+            "doubling both sides should quadruple cost"
+        );
     }
 
     #[test]

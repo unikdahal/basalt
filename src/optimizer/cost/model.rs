@@ -27,7 +27,12 @@ pub struct Cost {
 }
 
 impl Cost {
-    pub const ZERO: Cost = Cost { io: 0.0, cpu: 0.0, memory: 0.0, network: 0.0 };
+    pub const ZERO: Cost = Cost {
+        io: 0.0,
+        cpu: 0.0,
+        memory: 0.0,
+        network: 0.0,
+    };
 
     pub fn total(&self, weights: &CostWeights) -> f64 {
         self.io * weights.io_per_byte
@@ -134,16 +139,36 @@ mod tests {
 
     #[test]
     fn total_weights_each_component() {
-        let cost = Cost { io: 10.0, cpu: 5.0, memory: 2.0, network: 1.0 };
-        let weights = CostWeights { io_per_byte: 1.0, cpu_per_tuple: 2.0, memory_penalty: 3.0, network_per_byte: 4.0 };
+        let cost = Cost {
+            io: 10.0,
+            cpu: 5.0,
+            memory: 2.0,
+            network: 1.0,
+        };
+        let weights = CostWeights {
+            io_per_byte: 1.0,
+            cpu_per_tuple: 2.0,
+            memory_penalty: 3.0,
+            network_per_byte: 4.0,
+        };
         // 10*1 + 5*2 + 2*3 + 1*4 = 10+10+6+4 = 30
         assert!((cost.total(&weights) - 30.0).abs() < 1e-9);
     }
 
     #[test]
     fn combine_sums_everything_but_memory_which_takes_the_max() {
-        let a = Cost { io: 1.0, cpu: 1.0, memory: 10.0, network: 1.0 };
-        let b = Cost { io: 2.0, cpu: 2.0, memory: 5.0, network: 2.0 };
+        let a = Cost {
+            io: 1.0,
+            cpu: 1.0,
+            memory: 10.0,
+            network: 1.0,
+        };
+        let b = Cost {
+            io: 2.0,
+            cpu: 2.0,
+            memory: 5.0,
+            network: 2.0,
+        };
         let combined = a.combine(&b);
         assert_eq!(combined.io, 3.0);
         assert_eq!(combined.cpu, 3.0);

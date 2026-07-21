@@ -41,10 +41,16 @@ pub struct Selectivity {
 
 impl Selectivity {
     fn exact(value: f64) -> Self {
-        Selectivity { value: clamp(value), precision: Precision::Exact(()) }
+        Selectivity {
+            value: clamp(value),
+            precision: Precision::Exact(()),
+        }
     }
     fn inexact(value: f64) -> Self {
-        Selectivity { value: clamp(value), precision: Precision::Inexact(()) }
+        Selectivity {
+            value: clamp(value),
+            precision: Precision::Inexact(()),
+        }
     }
 }
 
@@ -63,15 +69,20 @@ fn clamp(v: f64) -> f64 {
 /// `schema`/`stats`.
 pub fn selectivity(predicate: &Expr, stats: &TableStatistics) -> Result<Selectivity> {
     Ok(match predicate {
-        Expr::Binary { left, op: BinaryOp::And, right } => {
-            combine_conjunction(&selectivity(left, stats)?, &selectivity(right, stats)?)
-        }
-        Expr::Binary { left, op: BinaryOp::Or, right } => {
-            combine_disjunction(&selectivity(left, stats)?, &selectivity(right, stats)?)
-        }
-        Expr::Unary { op: crate::types::coercion::UnaryOp::Not, expr } => {
-            negate(&selectivity(expr, stats)?)
-        }
+        Expr::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => combine_conjunction(&selectivity(left, stats)?, &selectivity(right, stats)?),
+        Expr::Binary {
+            left,
+            op: BinaryOp::Or,
+            right,
+        } => combine_disjunction(&selectivity(left, stats)?, &selectivity(right, stats)?),
+        Expr::Unary {
+            op: crate::types::coercion::UnaryOp::Not,
+            expr,
+        } => negate(&selectivity(expr, stats)?),
         Expr::IsNull(inner) => is_null_selectivity(inner, stats, true)?,
         Expr::IsNotNull(inner) => is_null_selectivity(inner, stats, false)?,
         Expr::Binary { left, op, right } => comparison_selectivity(left, *op, right, stats)?,
@@ -86,7 +97,11 @@ fn column_stats<'a>(expr: &Expr, stats: &'a TableStatistics) -> Option<&'a Colum
     }
 }
 
-fn is_null_selectivity(inner: &Expr, stats: &TableStatistics, want_null: bool) -> Result<Selectivity> {
+fn is_null_selectivity(
+    inner: &Expr,
+    stats: &TableStatistics,
+    want_null: bool,
+) -> Result<Selectivity> {
     let Some(col) = column_stats(inner, stats) else {
         return Ok(Selectivity::inexact(defaults::UNKNOWN));
     };
@@ -100,7 +115,11 @@ fn is_null_selectivity(inner: &Expr, stats: &TableStatistics, want_null: bool) -
         return Ok(Selectivity::inexact(defaults::UNKNOWN));
     }
     let null_frac = null_count as f64 / num_rows as f64;
-    let value = if want_null { null_frac } else { 1.0 - null_frac };
+    let value = if want_null {
+        null_frac
+    } else {
+        1.0 - null_frac
+    };
     Ok(if col.null_count.is_exact() && stats.num_rows.is_exact() {
         Selectivity::exact(value)
     } else {
@@ -118,7 +137,9 @@ fn comparison_selectivity(
     if op == BinaryOp::Eq {
         if let (Expr::Column { .. }, Expr::Column { .. }) = (left, right) {
             if let (Some(l), Some(r)) = (column_stats(left, stats), column_stats(right, stats)) {
-                if let (Some(&ndv_l), Some(&ndv_r)) = (l.distinct_count.get_value(), r.distinct_count.get_value()) {
+                if let (Some(&ndv_l), Some(&ndv_r)) =
+                    (l.distinct_count.get_value(), r.distinct_count.get_value())
+                {
                     let ndv = ndv_l.max(ndv_r).max(1);
                     return Ok(Selectivity::inexact(1.0 / ndv as f64));
                 }
@@ -170,7 +191,10 @@ fn value_to_scalar(v: &Value) -> Option<crate::scalar::ScalarValue> {
 /// `col = literal`: MCV frequency if present, else `(1 - sum(mcv
 /// frequencies)) / (ndv - mcv_count)`, else `1/ndv`, else the fallback
 /// constant.
-fn equality_selectivity(col: &ColumnStatistics, scalar: Option<&crate::scalar::ScalarValue>) -> Selectivity {
+fn equality_selectivity(
+    col: &ColumnStatistics,
+    scalar: Option<&crate::scalar::ScalarValue>,
+) -> Selectivity {
     if let (Some(mcv), Some(scalar)) = (&col.mcv, scalar) {
         if let Some(freq) = mcv.frequency_of(scalar) {
             return Selectivity::exact(freq);
@@ -212,7 +236,9 @@ fn inequality_selectivity(
 /// `col BETWEEN a AND b`: histogram range if present, else the fallback
 /// constant.
 pub fn range_selectivity(col: &ColumnStatistics, lo: &Value, hi: &Value) -> Selectivity {
-    if let (Some(hist), Some(lo), Some(hi)) = (&col.histogram, value_to_scalar(lo), value_to_scalar(hi)) {
+    if let (Some(hist), Some(lo), Some(hi)) =
+        (&col.histogram, value_to_scalar(lo), value_to_scalar(hi))
+    {
         if let Ok(frac) = hist.range(&lo, &hi) {
             return Selectivity::inexact(frac);
         }
@@ -298,7 +324,10 @@ fn weaker(a: Precision<()>, b: Precision<()>) -> Precision<()> {
 }
 
 fn with_precision(value: f64, precision: Precision<()>) -> Selectivity {
-    Selectivity { value: clamp(value), precision }
+    Selectivity {
+        value: clamp(value),
+        precision,
+    }
 }
 
 #[cfg(test)]
@@ -312,7 +341,11 @@ mod tests {
     }
 
     fn col(i: usize) -> Expr {
-        Expr::Column { index: i, data_type: DataType::Int64, nullable: false }
+        Expr::Column {
+            index: i,
+            data_type: DataType::Int64,
+            nullable: false,
+        }
     }
 
     fn lit(v: i64) -> Expr {
@@ -322,7 +355,11 @@ mod tests {
     #[test]
     fn equality_falls_back_to_default_with_no_statistics() {
         let s = selectivity(
-            &Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Eq, right: Box::new(lit(5)) },
+            &Expr::Binary {
+                left: Box::new(col(0)),
+                op: BinaryOp::Eq,
+                right: Box::new(lit(5)),
+            },
             &stats_unknown(),
         )
         .unwrap();
@@ -335,7 +372,11 @@ mod tests {
         let mut stats = stats_unknown();
         stats.column_statistics[0].distinct_count = Precision::Exact(100);
         let s = selectivity(
-            &Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Eq, right: Box::new(lit(5)) },
+            &Expr::Binary {
+                left: Box::new(col(0)),
+                op: BinaryOp::Eq,
+                right: Box::new(lit(5)),
+            },
             &stats,
         )
         .unwrap();
@@ -351,7 +392,11 @@ mod tests {
             frequencies: vec![0.6],
         });
         let s = selectivity(
-            &Expr::Binary { left: Box::new(col(0)), op: BinaryOp::Eq, right: Box::new(lit(5)) },
+            &Expr::Binary {
+                left: Box::new(col(0)),
+                op: BinaryOp::Eq,
+                right: Box::new(lit(5)),
+            },
             &stats,
         )
         .unwrap();
@@ -392,7 +437,10 @@ mod tests {
     #[test]
     fn zero_selectivity_is_clamped_to_a_nonzero_floor() {
         let s = Selectivity::exact(0.0);
-        assert!(s.value > 0.0, "a selectivity of exactly 0 must not propagate as free");
+        assert!(
+            s.value > 0.0,
+            "a selectivity of exactly 0 must not propagate as free"
+        );
     }
 
     #[test]
@@ -410,10 +458,17 @@ mod tests {
 
     #[test]
     fn backoff_damps_later_conjuncts_more_than_independence() {
-        let sels = vec![Selectivity::exact(0.5), Selectivity::exact(0.5), Selectivity::exact(0.5)];
+        let sels = vec![
+            Selectivity::exact(0.5),
+            Selectivity::exact(0.5),
+            Selectivity::exact(0.5),
+        ];
         let independence = sels.iter().fold(1.0, |acc, s| acc * s.value);
         let backoff = combine_conjunction_backoff(&sels).value;
-        assert!(backoff > independence, "backoff ({backoff}) should be less aggressive than independence ({independence})");
+        assert!(
+            backoff > independence,
+            "backoff ({backoff}) should be less aggressive than independence ({independence})"
+        );
     }
 
     #[test]
@@ -439,6 +494,9 @@ mod tests {
             BinaryOp::Lt,
             Some(&crate::scalar::ScalarValue::Int64(Some(10))),
         );
-        assert!(s.value < defaults::INEQUALITY, "10/100 rows below 10 should be well below the 0.33 default");
+        assert!(
+            s.value < defaults::INEQUALITY,
+            "10/100 rows below 10 should be well below the 0.33 default"
+        );
     }
 }

@@ -231,7 +231,11 @@ mod tests {
         let hist = Histogram::from_sorted(&arr, 10).unwrap();
         assert_eq!(hist.total_count, 100);
         for bucket in &hist.buckets {
-            assert!(bucket.count <= 10, "bucket count {} exceeds 10", bucket.count);
+            assert!(
+                bucket.count <= 10,
+                "bucket count {} exceeds 10",
+                bucket.count
+            );
         }
     }
 
@@ -257,7 +261,10 @@ mod tests {
         let arr = sorted_int_array(&values);
         let hist = Histogram::from_sorted(&arr, 10).unwrap();
         let sel = hist.equals(&ScalarValue::Int64(Some(7))).unwrap();
-        assert!(sel > 0.3, "expected high selectivity for a dominant value, got {sel}");
+        assert!(
+            sel > 0.3,
+            "expected high selectivity for a dominant value, got {sel}"
+        );
     }
 
     #[test]

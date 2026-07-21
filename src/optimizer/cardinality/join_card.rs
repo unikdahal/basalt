@@ -20,9 +20,14 @@ pub fn join_cardinality(
     on: &[(usize, usize)],
     join_type: JoinType,
 ) -> Precision<usize> {
-    assert!(!on.is_empty(), "join_cardinality requires at least one join column pair");
+    assert!(
+        !on.is_empty(),
+        "join_cardinality requires at least one join column pair"
+    );
 
-    let (Some(&left_rows), Some(&right_rows)) = (left.num_rows.get_value(), right.num_rows.get_value()) else {
+    let (Some(&left_rows), Some(&right_rows)) =
+        (left.num_rows.get_value(), right.num_rows.get_value())
+    else {
         return Precision::Absent;
     };
 
@@ -37,13 +42,17 @@ pub fn join_cardinality(
     let mut denom = 1.0f64;
     let mut any_absent = false;
     for &(l_col, r_col) in on {
-        let (Some(l_stats), Some(r_stats)) =
-            (left.column_statistics.get(l_col), right.column_statistics.get(r_col))
-        else {
+        let (Some(l_stats), Some(r_stats)) = (
+            left.column_statistics.get(l_col),
+            right.column_statistics.get(r_col),
+        ) else {
             any_absent = true;
             continue;
         };
-        match (l_stats.distinct_count.get_value(), r_stats.distinct_count.get_value()) {
+        match (
+            l_stats.distinct_count.get_value(),
+            r_stats.distinct_count.get_value(),
+        ) {
             (Some(&l_ndv), Some(&r_ndv)) if l_ndv > 0 && r_ndv > 0 => {
                 denom *= l_ndv.max(r_ndv) as f64;
             }
@@ -84,7 +93,10 @@ pub fn join_cardinality(
 
 /// A genuine cross product (no join columns at all): `|R| * |S|`, with no
 /// NDV involved since there's no join predicate to apply selectivity to.
-pub fn cross_product_cardinality(left: &TableStatistics, right: &TableStatistics) -> Precision<usize> {
+pub fn cross_product_cardinality(
+    left: &TableStatistics,
+    right: &TableStatistics,
+) -> Precision<usize> {
     left.num_rows.multiply(&right.num_rows)
 }
 
@@ -117,7 +129,10 @@ mod tests {
         let right = stats(2, 1000);
         let card = join_cardinality(&left, &right, &[(0, 0)], JoinType::Left);
         let value = *card.get_value().unwrap();
-        assert!(value >= 1000, "LEFT JOIN cardinality {value} must be >= left row count 1000");
+        assert!(
+            value >= 1000,
+            "LEFT JOIN cardinality {value} must be >= left row count 1000"
+        );
     }
 
     #[test]
@@ -126,7 +141,10 @@ mod tests {
         let right = stats(100_000, 5);
         let card = join_cardinality(&left, &right, &[(0, 0)], JoinType::LeftSemi);
         let value = *card.get_value().unwrap();
-        assert!(value <= 100, "LEFT SEMI cardinality {value} must not exceed left row count 100");
+        assert!(
+            value <= 100,
+            "LEFT SEMI cardinality {value} must not exceed left row count 100"
+        );
     }
 
     #[test]
@@ -141,7 +159,10 @@ mod tests {
     fn cross_product_multiplies_row_counts() {
         let left = stats(10, 1);
         let right = stats(20, 1);
-        assert_eq!(cross_product_cardinality(&left, &right).get_value(), Some(&200));
+        assert_eq!(
+            cross_product_cardinality(&left, &right).get_value(),
+            Some(&200)
+        );
     }
 
     #[test]

@@ -125,7 +125,10 @@ mod tests {
         }
         let estimate = hll.estimate() as f64;
         let error = (estimate - true_ndv as f64).abs() / true_ndv as f64;
-        assert!(error < 0.1, "estimate {estimate} too far from true NDV {true_ndv} (error {error})");
+        assert!(
+            error < 0.1,
+            "estimate {estimate} too far from true NDV {true_ndv} (error {error})"
+        );
     }
 
     #[test]
@@ -134,7 +137,11 @@ mod tests {
         for _ in 0..1000 {
             hll.add(&"same-value");
         }
-        assert!(hll.estimate() <= 5, "expected ~1 distinct value, got {}", hll.estimate());
+        assert!(
+            hll.estimate() <= 5,
+            "expected ~1 distinct value, got {}",
+            hll.estimate()
+        );
     }
 
     #[test]
@@ -158,7 +165,10 @@ mod tests {
         let merged_est = merged.estimate() as f64;
         let direct_est = direct.estimate() as f64;
         let rel_diff = (merged_est - direct_est).abs() / direct_est;
-        assert!(rel_diff < 0.05, "merged {merged_est} vs direct {direct_est}");
+        assert!(
+            rel_diff < 0.05,
+            "merged {merged_est} vs direct {direct_est}"
+        );
     }
 
     #[test]

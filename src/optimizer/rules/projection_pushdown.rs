@@ -47,14 +47,22 @@ impl OptimizerRule for ProjectionPushdown {
     /// `PredicatePushdown` has already moved the `Filter` down to sit
     /// directly on the scan, which the fixed-point loop guarantees happens
     /// before this rule's next pass sees it.
-    fn apply(&self, plan: LogicalPlan, _ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>> {
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        _ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>> {
         match &plan {
-            LogicalPlan::Projection { input, exprs, .. } if matches!(input.as_ref(), LogicalPlan::TableScan { .. }) => {
+            LogicalPlan::Projection { input, exprs, .. }
+                if matches!(input.as_ref(), LogicalPlan::TableScan { .. }) =>
+            {
                 let needed = required_columns_for_exprs(exprs);
                 let input = input.clone();
                 push_projection_into_scan(plan, &input, &needed)
             }
-            LogicalPlan::Filter { input, predicate } if matches!(input.as_ref(), LogicalPlan::TableScan { .. }) => {
+            LogicalPlan::Filter { input, predicate }
+                if matches!(input.as_ref(), LogicalPlan::TableScan { .. }) =>
+            {
                 let needed = referenced_columns(predicate).into_iter().collect();
                 let input = input.clone();
                 push_filter_into_scan(plan, &input, &needed)
@@ -73,7 +81,14 @@ fn push_projection_into_scan(
     scan: &Arc<LogicalPlan>,
     needed: &HashSet<usize>,
 ) -> Result<Transformed<LogicalPlan>> {
-    let LogicalPlan::TableScan { table_name, source, projection, filters, schema } = scan.as_ref() else {
+    let LogicalPlan::TableScan {
+        table_name,
+        source,
+        projection,
+        filters,
+        schema,
+    } = scan.as_ref()
+    else {
         unreachable!("caller matched TableScan");
     };
     if projection.is_some() {
@@ -92,7 +107,12 @@ fn push_projection_into_scan(
         filters: filters.clone(),
         schema: schema.clone(),
     });
-    let LogicalPlan::Projection { exprs, schema: proj_schema, .. } = plan else {
+    let LogicalPlan::Projection {
+        exprs,
+        schema: proj_schema,
+        ..
+    } = plan
+    else {
         unreachable!("caller matched Projection");
     };
     Ok(Transformed::Yes(LogicalPlan::Projection {
@@ -107,7 +127,14 @@ fn push_filter_into_scan(
     scan: &Arc<LogicalPlan>,
     needed: &HashSet<usize>,
 ) -> Result<Transformed<LogicalPlan>> {
-    let LogicalPlan::TableScan { table_name, source, projection, filters, schema } = scan.as_ref() else {
+    let LogicalPlan::TableScan {
+        table_name,
+        source,
+        projection,
+        filters,
+        schema,
+    } = scan.as_ref()
+    else {
         unreachable!("caller matched TableScan");
     };
     if projection.is_some() || needed.len() == schema.fields().len() {
@@ -161,12 +188,11 @@ mod tests {
 
     #[test]
     fn projection_pushes_only_referenced_columns_into_the_scan() {
-        let scan = LogicalPlanBuilder::scan(
-            "t",
-            Arc::new(MemoryTableSource::new(wide_schema(), vec![])),
-        )
-        .build();
-        let out_schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]).unwrap());
+        let scan =
+            LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(wide_schema(), vec![])))
+                .build();
+        let out_schema =
+            Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]).unwrap());
         let plan = LogicalPlan::Projection {
             input: scan,
             exprs: vec![col(0)],
@@ -187,11 +213,9 @@ mod tests {
 
     #[test]
     fn does_not_push_when_every_column_is_needed() {
-        let scan = LogicalPlanBuilder::scan(
-            "t",
-            Arc::new(MemoryTableSource::new(wide_schema(), vec![])),
-        )
-        .build();
+        let scan =
+            LogicalPlanBuilder::scan("t", Arc::new(MemoryTableSource::new(wide_schema(), vec![])))
+                .build();
         let plan = LogicalPlan::Projection {
             input: scan,
             exprs: vec![col(0), col(1), col(2)],

@@ -21,16 +21,25 @@ impl OptimizerRule for EliminateFilter {
         ApplyOrder::BottomUp
     }
 
-    fn apply(&self, plan: LogicalPlan, _ctx: &dyn OptimizerContext) -> Result<Transformed<LogicalPlan>> {
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        _ctx: &dyn OptimizerContext,
+    ) -> Result<Transformed<LogicalPlan>> {
         let LogicalPlan::Filter { input, predicate } = plan else {
             return Ok(Transformed::No(plan));
         };
         match predicate {
             Expr::Literal(Value::Boolean(true)) => Ok(Transformed::Yes(input.as_ref().clone())),
-            Expr::Literal(Value::Boolean(false)) => Ok(Transformed::Yes(LogicalPlan::EmptyRelation {
-                schema: input.schema().clone(),
+            Expr::Literal(Value::Boolean(false)) => {
+                Ok(Transformed::Yes(LogicalPlan::EmptyRelation {
+                    schema: input.schema().clone(),
+                }))
+            }
+            other => Ok(Transformed::No(LogicalPlan::Filter {
+                input,
+                predicate: other,
             })),
-            other => Ok(Transformed::No(LogicalPlan::Filter { input, predicate: other })),
         }
     }
 }
