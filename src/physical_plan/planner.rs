@@ -78,24 +78,39 @@ impl PhysicalPlanner {
                     schema.clone(),
                 )))
             }
+            // `ORDER BY ... LIMIT k` with no OFFSET: detect the Sort-under-
+            // Limit shape and build the bounded-heap TopKExec instead of a
+            // full SortExec followed by a LimitExec. In Phase 2 this is a
+            // planner-level special case rather than a real optimizer rule
+            // (the LLD's own framing: "in Phase 3 this becomes a proper
+            // optimizer rule; in Phase 2, special-case it in the planner").
+            LogicalPlan::Limit {
+                input,
+                skip: 0,
+                fetch: Some(k),
+            } if matches!(input.as_ref(), LogicalPlan::Sort { .. }) => {
+                let LogicalPlan::Sort {
+                    input: sort_input,
+                    exprs,
+                } = input.as_ref()
+                else {
+                    unreachable!("matched above")
+                };
+                let child = self.create_physical_plan(sort_input)?;
+                let physical_exprs = self.physical_sort_exprs(exprs)?;
+                Ok(Arc::new(super::sort::TopKExec::new(
+                    child,
+                    physical_exprs,
+                    *k,
+                )))
+            }
             LogicalPlan::Limit { input, skip, fetch } => {
                 let child = self.create_physical_plan(input)?;
                 Ok(Arc::new(LimitExec::new(child, *skip, *fetch)))
             }
             LogicalPlan::Sort { input, exprs } => {
                 let child = self.create_physical_plan(input)?;
-                let physical_exprs = exprs
-                    .iter()
-                    .map(|se| {
-                        Ok(PhysicalSortExpr {
-                            expr: self.create_physical_expr(&se.expr)?,
-                            options: crate::compute::sort::SortOptions {
-                                descending: se.options.descending,
-                                nulls_first: se.options.nulls_first,
-                            },
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                let physical_exprs = self.physical_sort_exprs(exprs)?;
                 Ok(Arc::new(SortExec::new(child, physical_exprs)))
             }
             LogicalPlan::Aggregate {
@@ -192,6 +207,24 @@ impl PhysicalPlanner {
                 }
             }
         }
+    }
+
+    fn physical_sort_exprs(
+        &self,
+        exprs: &[crate::logical_plan::SortExpr],
+    ) -> Result<Vec<PhysicalSortExpr>> {
+        exprs
+            .iter()
+            .map(|se| {
+                Ok(PhysicalSortExpr {
+                    expr: self.create_physical_expr(&se.expr)?,
+                    options: crate::compute::sort::SortOptions {
+                        descending: se.options.descending,
+                        nulls_first: se.options.nulls_first,
+                    },
+                })
+            })
+            .collect()
     }
 
     /// Takes no schema parameter: Phase 1's bound `Expr` already carries
@@ -408,6 +441,47 @@ mod tests {
             }])
             .build();
         let physical = PhysicalPlanner.create_physical_plan(&logical).unwrap();
+        let batches: Vec<_> = physical
+            .execute(0)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let col = as_primitive::<Int64Type>(batches[0].column(0).unwrap().as_ref()).unwrap();
+        assert_eq!(
+            (0..3).map(|i| col.value(i)).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    /// `ORDER BY ... LIMIT k` (no OFFSET) must plan to a `TopKExec`, not a
+    /// `SortExec` composed with `LimitExec` — the planner-level special case
+    /// documented in create_physical_plan's Limit-over-Sort arm.
+    #[test]
+    fn order_by_limit_plans_to_topk_exec() {
+        let source = Arc::new(MemoryTableSource::new(
+            schema(),
+            vec![source_batch(&[5, 3, 1, 4, 2])],
+        ));
+        let logical = LogicalPlanBuilder::scan("t", source)
+            .sort(vec![crate::logical_plan::SortExpr {
+                expr: Expr::Column {
+                    index: 0,
+                    data_type: DataType::Int64,
+                    nullable: false,
+                },
+                options: crate::logical_plan::SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+            }])
+            .limit(0, Some(3))
+            .build();
+        let physical = PhysicalPlanner.create_physical_plan(&logical).unwrap();
+        assert!(physical
+            .as_any()
+            .downcast_ref::<crate::physical_plan::sort::TopKExec>()
+            .is_some());
+
         let batches: Vec<_> = physical
             .execute(0)
             .unwrap()
