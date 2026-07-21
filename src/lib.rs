@@ -18,10 +18,12 @@ pub mod error;
 pub mod array;
 pub mod batch;
 pub mod buffer;
+pub mod compute;
 pub mod exec;
 pub mod expr;
 pub mod io;
 pub mod plan;
+pub mod scalar;
 pub mod sql;
 pub mod types;
 
