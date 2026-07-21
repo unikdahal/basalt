@@ -5,8 +5,10 @@ pub mod arith;
 pub mod boolean;
 pub mod cast;
 pub mod comparison;
+pub mod concat;
 pub mod filter;
 pub mod index;
+pub mod sort;
 pub mod take;
 
 use std::sync::Arc;

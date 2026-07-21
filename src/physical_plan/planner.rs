@@ -15,6 +15,7 @@ use super::limit::LimitExec;
 use super::plan::ExecutionPlanRef;
 use super::projection::ProjectionExec;
 use super::scan::MemoryTableSource;
+use super::sort::{PhysicalSortExpr, SortExec};
 use crate::error::{BasaltError, Result};
 use crate::expr::expr::{Expr, UnaryOp};
 use crate::logical_plan::LogicalPlan;
@@ -80,9 +81,22 @@ impl PhysicalPlanner {
                 let child = self.create_physical_plan(input)?;
                 Ok(Arc::new(LimitExec::new(child, *skip, *fetch)))
             }
-            LogicalPlan::Sort { .. } => Err(BasaltError::Internal(
-                "Sort physical planning: see physical_plan::sort".to_string(),
-            )),
+            LogicalPlan::Sort { input, exprs } => {
+                let child = self.create_physical_plan(input)?;
+                let physical_exprs = exprs
+                    .iter()
+                    .map(|se| {
+                        Ok(PhysicalSortExpr {
+                            expr: self.create_physical_expr(&se.expr)?,
+                            options: crate::compute::sort::SortOptions {
+                                descending: se.options.descending,
+                                nulls_first: se.options.nulls_first,
+                            },
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Arc::new(SortExec::new(child, physical_exprs)))
+            }
             LogicalPlan::Aggregate {
                 input,
                 group_expr,
@@ -312,6 +326,26 @@ mod tests {
     #[test]
     fn unsupported_plan_node_errors_cleanly_not_panics() {
         let source = Arc::new(MemoryTableSource::new(schema(), vec![]));
+        let right =
+            LogicalPlanBuilder::scan("t2", Arc::new(MemoryTableSource::new(schema(), vec![])));
+        let logical = LogicalPlanBuilder::scan("t", source)
+            .join(
+                right.build(),
+                vec![],
+                None,
+                crate::logical_plan::JoinType::Inner,
+            )
+            .unwrap()
+            .build();
+        assert!(PhysicalPlanner.create_physical_plan(&logical).is_err());
+    }
+
+    #[test]
+    fn end_to_end_scan_then_sort() {
+        let source = Arc::new(MemoryTableSource::new(
+            schema(),
+            vec![source_batch(&[3, 1, 2])],
+        ));
         let logical = LogicalPlanBuilder::scan("t", source)
             .sort(vec![crate::logical_plan::SortExpr {
                 expr: Expr::Column {
@@ -325,6 +359,16 @@ mod tests {
                 },
             }])
             .build();
-        assert!(PhysicalPlanner.create_physical_plan(&logical).is_err());
+        let physical = PhysicalPlanner.create_physical_plan(&logical).unwrap();
+        let batches: Vec<_> = physical
+            .execute(0)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let col = as_primitive::<Int64Type>(batches[0].column(0).unwrap().as_ref()).unwrap();
+        assert_eq!(
+            (0..3).map(|i| col.value(i)).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
     }
 }
