@@ -17,6 +17,16 @@
 use super::buffer::Buffer;
 use crate::error::{BasaltError, Result};
 
+/// Reads bit `bit_offset + i` from an already-hoisted byte slice — the
+/// bit-level twin of indexing a hoisted `values()` slice in
+/// `compute::arith`. Pair with [`Bitmap::as_bytes`] / [`Bitmap::bit_offset`]
+/// to avoid re-deriving the slice on every element in a loop.
+#[inline]
+pub fn bit_at(bytes: &[u8], bit_offset: usize, i: usize) -> bool {
+    let bit = bit_offset + i;
+    (bytes[bit / 8] >> (bit % 8)) & 1 != 0
+}
+
 #[derive(Clone, Debug)]
 pub struct Bitmap {
     buffer: Buffer,
@@ -53,6 +63,23 @@ impl Bitmap {
         let bit = self.offset + i;
         let byte = self.buffer.as_slice()[bit / 8];
         (byte >> (bit % 8)) & 1 != 0
+    }
+
+    /// Raw byte access for hot per-element loops that iterate the whole
+    /// bitmap: `Buffer::as_slice()` re-derives its slice (`Arc` deref plus
+    /// two nested offset/len computations) on every call, so calling `get`
+    /// in a tight loop pays that cost once per bit instead of once for the
+    /// whole scan — the same class of bug `compute::arith`'s `value(i)` had
+    /// (see that module's doc comment). Pair with [`Self::bit_offset`] and
+    /// [`bit_at`] to hoist the slice once before the loop.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.buffer.as_slice()
+    }
+
+    /// The bit offset to add to a logical index before indexing
+    /// [`Self::as_bytes`] — see [`bit_at`].
+    pub fn bit_offset(&self) -> usize {
+        self.offset
     }
 
     pub fn len(&self) -> usize {
@@ -95,9 +122,11 @@ impl Bitmap {
     }
 
     pub fn not(&self) -> Bitmap {
+        let bytes = self.as_bytes();
+        let offset = self.bit_offset();
         let mut builder = BitmapBuilder::with_capacity(self.len);
         for i in 0..self.len {
-            builder.push(!self.get(i));
+            builder.push(!bit_at(bytes, offset, i));
         }
         builder.finish()
     }
@@ -109,9 +138,14 @@ impl Bitmap {
                 self.len, other.len
             )));
         }
+        let (l_bytes, l_offset) = (self.as_bytes(), self.bit_offset());
+        let (r_bytes, r_offset) = (other.as_bytes(), other.bit_offset());
         let mut builder = BitmapBuilder::with_capacity(self.len);
         for i in 0..self.len {
-            builder.push(f(self.get(i), other.get(i)));
+            builder.push(f(
+                bit_at(l_bytes, l_offset, i),
+                bit_at(r_bytes, r_offset, i),
+            ));
         }
         Ok(builder.finish())
     }

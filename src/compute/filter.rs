@@ -12,6 +12,7 @@
 
 use crate::array::array::{Array, ArrayRef};
 use crate::array::boolean::BooleanArray;
+use crate::buffer::bit_at;
 use crate::compute::index::UInt32Builder;
 use crate::compute::take::take;
 use crate::error::{BasaltError, Result};
@@ -30,9 +31,27 @@ pub fn filter(array: &dyn Array, predicate: &BooleanArray) -> Result<ArrayRef> {
         )));
     }
 
-    let selected = (0..predicate.len())
-        .filter(|&i| predicate.is_valid(i) && predicate.value(i))
-        .count();
+    // Hoisting the predicate's values/validity bitmaps once, rather than
+    // calling `predicate.is_valid(i)`/`.value(i)` per row (each re-derives
+    // its slice via `Bitmap::get` -> `Buffer::as_slice()`), matters a lot
+    // here: this runs over the *whole* unfiltered array, once to count and
+    // once to gather — found via `benches/tpch.rs`, where a multi-predicate
+    // `WHERE` clause made Phase 2 slower than Phase 1 before this fix.
+    let (values_bytes, values_offset) = (
+        predicate.values().as_bytes(),
+        predicate.values().bit_offset(),
+    );
+    let validity = predicate.validity().map(|v| (v.as_bytes(), v.bit_offset()));
+    let is_selected = |i: usize| -> bool {
+        if let Some((bytes, offset)) = validity {
+            if !bit_at(bytes, offset, i) {
+                return false;
+            }
+        }
+        bit_at(values_bytes, values_offset, i)
+    };
+
+    let selected = (0..predicate.len()).filter(|&i| is_selected(i)).count();
 
     if selected == 0 {
         return Ok(array.slice(0, 0));
@@ -45,7 +64,7 @@ pub fn filter(array: &dyn Array, predicate: &BooleanArray) -> Result<ArrayRef> {
 
     let mut indices = UInt32Builder::with_capacity(selected);
     for i in 0..predicate.len() {
-        if predicate.is_valid(i) && predicate.value(i) {
+        if is_selected(i) {
             indices.append_value(i as u32);
         }
     }

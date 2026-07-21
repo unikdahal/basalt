@@ -74,4 +74,23 @@ fn main() {
     };
     let rhs = ColumnarValue::Scalar(ScalarValue::Int64(Some(1)));
     time_it("6_full_kernel_add", 50, || add(&lhs_array, &rhs).unwrap());
+
+    // Sustained-load check: criterion's 1M sample ran ~400 iterations over
+    // ~5.8s continuously. If short bursts benefit from turbo boost that a
+    // multi-second sustained load can't hold, this should show a slower
+    // ns/elem than the short 50-iteration run above despite being the exact
+    // same kernel call.
+    time_it("6b_full_kernel_add_sustained_400iters", 400, || {
+        add(&lhs_array, &rhs).unwrap()
+    });
+
+    // 3-second warmup, THEN measure — matches criterion's warmup discipline
+    // more closely, to rule out a still-ramping clock skewing the number.
+    let warmup_start = Instant::now();
+    while warmup_start.elapsed().as_secs_f64() < 3.0 {
+        std::hint::black_box(add(&lhs_array, &rhs).unwrap());
+    }
+    time_it("6c_full_kernel_add_after_3s_warmup", 400, || {
+        add(&lhs_array, &rhs).unwrap()
+    });
 }

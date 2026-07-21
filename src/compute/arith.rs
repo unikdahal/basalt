@@ -22,15 +22,51 @@
 //! which dominated the timing and even inverted the expected speedup at
 //! large N. Array⊕array still goes through `into_array` (already a no-op
 //! there, since both sides are already arrays).
+//!
+//! **`add`/`sub` additionally take a branch-free overflow-checked fast path**
+//! when every operand touched is Int64 with no nulls (the common case).
+//! `checked_add`/`checked_sub` each compile to a per-element branch — exactly
+//! the kind of branch that blocks auto-vectorization — but signed-overflow
+//! detection for `+`/`-` has a well-known branch-free bitwise form: compute
+//! the `wrapping_add`/`wrapping_sub` result, then
+//! `overflow = ((a ^ r) & (b ^ r)) < 0` (add) / `((a ^ b) & (a ^ r)) < 0`
+//! (sub) is true iff the operation actually overflowed. That lets the loop
+//! OR the per-element overflow flags into one accumulator and check it once,
+//! after the loop, instead of branching (and risking an early bailout that
+//! defeats vectorization) on every element. `mul`/`div`/`rem` don't have as
+//! cheap a branch-free form (`mul` needs a widening check; `div`/`rem` must
+//! branch on a zero divisor regardless) and keep the general path below.
+//! This fast path also skips `PrimitiveBuilder`'s per-element validity-bit
+//! write entirely, building the result with `validity: None` directly —
+//! see `BENCHMARKS.md`'s "remaining known gap" note this closes.
 
 use std::sync::Arc;
 
 use super::ColumnarValue;
 use crate::array::array::{as_primitive, Array};
-use crate::array::primitive::PrimitiveBuilder;
+use crate::array::primitive::{Int64Array, PrimitiveBuilder};
 use crate::array::types::{Float64Type, Int64Type};
+use crate::buffer::MutableBuffer;
 use crate::error::{BasaltError, Result};
 use crate::scalar::ScalarValue;
+
+/// A branch-free `(i64, i64) -> (i64, bool)` overflow-checked op
+/// (`add`/`sub`); see the module doc comment.
+type FastIntOp = fn(i64, i64) -> (i64, bool);
+
+/// Branch-free overflow-checked `i64` add: see the module doc comment.
+#[inline]
+fn wrapping_add_overflow(a: i64, b: i64) -> (i64, bool) {
+    let r = a.wrapping_add(b);
+    (r, ((a ^ r) & (b ^ r)) < 0)
+}
+
+/// Branch-free overflow-checked `i64` sub: see the module doc comment.
+#[inline]
+fn wrapping_sub_overflow(a: i64, b: i64) -> (i64, bool) {
+    let r = a.wrapping_sub(b);
+    (r, ((a ^ b) & (a ^ r)) < 0)
+}
 
 pub fn add(lhs: &ColumnarValue, rhs: &ColumnarValue) -> Result<ColumnarValue> {
     binary_numeric(
@@ -38,6 +74,7 @@ pub fn add(lhs: &ColumnarValue, rhs: &ColumnarValue) -> Result<ColumnarValue> {
         rhs,
         |a, b| a.checked_add(b).ok_or(BasaltError::NumericOverflow),
         |a, b| Ok(a + b),
+        Some(wrapping_add_overflow),
     )
 }
 
@@ -47,6 +84,7 @@ pub fn sub(lhs: &ColumnarValue, rhs: &ColumnarValue) -> Result<ColumnarValue> {
         rhs,
         |a, b| a.checked_sub(b).ok_or(BasaltError::NumericOverflow),
         |a, b| Ok(a - b),
+        Some(wrapping_sub_overflow),
     )
 }
 
@@ -56,6 +94,7 @@ pub fn mul(lhs: &ColumnarValue, rhs: &ColumnarValue) -> Result<ColumnarValue> {
         rhs,
         |a, b| a.checked_mul(b).ok_or(BasaltError::NumericOverflow),
         |a, b| Ok(a * b),
+        None,
     )
 }
 
@@ -77,6 +116,7 @@ pub fn div(lhs: &ColumnarValue, rhs: &ColumnarValue) -> Result<ColumnarValue> {
                 Ok(a / b)
             }
         },
+        None,
     )
 }
 
@@ -98,31 +138,81 @@ pub fn rem(lhs: &ColumnarValue, rhs: &ColumnarValue) -> Result<ColumnarValue> {
                 Ok(a % b)
             }
         },
+        None,
     )
 }
 
-/// Shared machinery for the four arithmetic ops above: materializes both
+/// Branch-free array⊕array fast path for `add`/`sub` over non-null Int64
+/// arrays: see the module doc comment. Writes straight into a
+/// `MutableBuffer` — no intermediate `Vec<i64>` — since going through one
+/// first and then `extend_from_slice`-ing it in adds a whole extra copy of
+/// the output on top of `MutableBuffer::freeze`'s own aligning copy.
+fn fast_int64_array_array(l: &[i64], r: &[i64], op: FastIntOp) -> Result<ColumnarValue> {
+    let mut buf = MutableBuffer::with_capacity(std::mem::size_of_val(l));
+    let mut overflow_acc: i64 = 0;
+    for (&a, &b) in l.iter().zip(r.iter()) {
+        let (v, overflowed) = op(a, b);
+        overflow_acc |= i64::from(overflowed);
+        buf.push(v);
+    }
+    if overflow_acc != 0 {
+        return Err(BasaltError::NumericOverflow);
+    }
+    let array = Int64Array::from_parts_unchecked(buf.freeze(), None, l.len());
+    Ok(ColumnarValue::Array(Arc::new(array)))
+}
+
+/// Branch-free array⊕scalar (or scalar⊕array, via `scalar_on_left`) fast
+/// path for `add`/`sub` over a non-null Int64 array and a non-null scalar.
+fn fast_int64_array_scalar(
+    values: &[i64],
+    scalar: i64,
+    scalar_on_left: bool,
+    op: FastIntOp,
+) -> Result<ColumnarValue> {
+    let mut buf = MutableBuffer::with_capacity(std::mem::size_of_val(values));
+    let mut overflow_acc: i64 = 0;
+    for &v in values {
+        let (r, overflowed) = if scalar_on_left {
+            op(scalar, v)
+        } else {
+            op(v, scalar)
+        };
+        overflow_acc |= i64::from(overflowed);
+        buf.push(r);
+    }
+    if overflow_acc != 0 {
+        return Err(BasaltError::NumericOverflow);
+    }
+    let array = Int64Array::from_parts_unchecked(buf.freeze(), None, values.len());
+    Ok(ColumnarValue::Array(Arc::new(array)))
+}
+
+/// Shared machinery for the five arithmetic ops above: materializes both
 /// sides to the same length, dispatches on whether the (already-coerced,
 /// per Phase 1's binder) type is `Int64` or `Float64`, and applies the
-/// per-element op with null-skipping.
+/// per-element op with null-skipping. `fast_int`, when present, is a
+/// branch-free `(i64, i64) -> (i64, bool)` overflow-checked op (`add`/`sub`
+/// only) used whenever every operand touched is provably non-null.
 fn binary_numeric(
     lhs: &ColumnarValue,
     rhs: &ColumnarValue,
     int_op: impl Fn(i64, i64) -> Result<i64>,
     float_op: impl Fn(f64, f64) -> Result<f64>,
+    fast_int: Option<FastIntOp>,
 ) -> Result<ColumnarValue> {
     match (lhs, rhs) {
         (ColumnarValue::Scalar(l), ColumnarValue::Scalar(r)) => Ok(ColumnarValue::Scalar(
             scalar_numeric(l, r, &int_op, &float_op)?,
         )),
         (ColumnarValue::Array(l), ColumnarValue::Scalar(r)) => {
-            array_scalar_numeric(l.as_ref(), r, &int_op, &float_op, false)
+            array_scalar_numeric(l.as_ref(), r, &int_op, &float_op, false, fast_int)
         }
         (ColumnarValue::Scalar(l), ColumnarValue::Array(r)) => {
-            array_scalar_numeric(r.as_ref(), l, &int_op, &float_op, true)
+            array_scalar_numeric(r.as_ref(), l, &int_op, &float_op, true, fast_int)
         }
         (ColumnarValue::Array(l), ColumnarValue::Array(r)) => {
-            array_array_numeric(l.as_ref(), r.as_ref(), &int_op, &float_op)
+            array_array_numeric(l.as_ref(), r.as_ref(), &int_op, &float_op, fast_int)
         }
     }
 }
@@ -138,18 +228,25 @@ fn array_scalar_numeric(
     int_op: impl Fn(i64, i64) -> Result<i64>,
     float_op: impl Fn(f64, f64) -> Result<f64>,
     scalar_on_left: bool,
+    fast_int: Option<FastIntOp>,
 ) -> Result<ColumnarValue> {
     let num_rows = array.len();
     match (array.data_type(), scalar) {
         (crate::types::data_type::DataType::Int64, ScalarValue::Int64(s)) => {
             let a = as_primitive::<Int64Type>(array)?;
-            let mut builder = PrimitiveBuilder::<Int64Type>::with_capacity(num_rows);
             let Some(s) = *s else {
+                let mut builder = PrimitiveBuilder::<Int64Type>::with_capacity(num_rows);
                 for _ in 0..num_rows {
                     builder.append_null();
                 }
                 return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
             };
+            if let Some(op) = fast_int {
+                if a.null_count() == 0 {
+                    return fast_int64_array_scalar(a.values(), s, scalar_on_left, op);
+                }
+            }
+            let mut builder = PrimitiveBuilder::<Int64Type>::with_capacity(num_rows);
             // `values()` re-derives its slice from the underlying `Arc`-backed
             // buffer on every call (see `Buffer::as_slice`); hoisting it out
             // of the loop turns a per-element pointer-chase into a single
@@ -206,6 +303,7 @@ fn array_array_numeric(
     rhs_array: &dyn Array,
     int_op: impl Fn(i64, i64) -> Result<i64>,
     float_op: impl Fn(f64, f64) -> Result<f64>,
+    fast_int: Option<FastIntOp>,
 ) -> Result<ColumnarValue> {
     if lhs_array.len() != rhs_array.len() {
         return Err(BasaltError::Internal(format!(
@@ -220,6 +318,11 @@ fn array_array_numeric(
         (crate::types::data_type::DataType::Int64, crate::types::data_type::DataType::Int64) => {
             let l = as_primitive::<Int64Type>(lhs_array)?;
             let r = as_primitive::<Int64Type>(rhs_array)?;
+            if let Some(op) = fast_int {
+                if l.null_count() == 0 && r.null_count() == 0 {
+                    return fast_int64_array_array(l.values(), r.values(), op);
+                }
+            }
             let mut builder = PrimitiveBuilder::<Int64Type>::with_capacity(num_rows);
             let (l_values, r_values) = (l.values(), r.values());
             for i in 0..num_rows {
@@ -437,6 +540,51 @@ mod tests {
         let result = as_float64(&result);
         assert_eq!(result.value(0), 0.75);
         assert_eq!(result.value(1), 1.25);
+    }
+
+    #[test]
+    fn fast_path_add_overflow_is_detected_regardless_of_position() {
+        // Regression test for the branch-free fast path: the overflow flag
+        // is OR-accumulated across the whole loop rather than checked
+        // per-element, so an overflow anywhere in a large non-null batch
+        // (not just the first or last element) must still be caught.
+        let mut values: Vec<Option<i64>> = vec![Some(1); 1000];
+        values[500] = Some(i64::MAX);
+        let lhs = int_array(&values);
+        let rhs = int_array(&vec![Some(1); 1000]);
+        assert!(matches!(
+            add(&lhs, &rhs).unwrap_err(),
+            BasaltError::NumericOverflow
+        ));
+    }
+
+    #[test]
+    fn fast_path_sub_overflow_errors() {
+        let lhs = int_array(&[Some(i64::MIN)]);
+        let rhs = int_array(&[Some(1)]);
+        assert!(matches!(
+            sub(&lhs, &rhs).unwrap_err(),
+            BasaltError::NumericOverflow
+        ));
+    }
+
+    #[test]
+    fn fast_path_sub_no_overflow_matches_checked_result() {
+        let lhs = int_array(&[Some(10), Some(-5), Some(i64::MIN + 1)]);
+        let rhs = int_array(&[Some(3), Some(-8), Some(1)]);
+        let result = sub(&lhs, &rhs).unwrap();
+        let result = as_int64(&result);
+        assert_eq!(result.value(0), 7);
+        assert_eq!(result.value(1), 3);
+        assert_eq!(result.value(2), i64::MIN);
+    }
+
+    #[test]
+    fn fast_path_array_scalar_no_overflow_matches_checked_result() {
+        let lhs = int_array(&[Some(1), Some(2), Some(3)]);
+        let rhs = ColumnarValue::Scalar(ScalarValue::Int64(Some(5)));
+        assert_eq!(as_int64(&add(&lhs, &rhs).unwrap()).value(1), 7);
+        assert_eq!(as_int64(&sub(&lhs, &rhs).unwrap()).value(1), -3);
     }
 
     #[test]

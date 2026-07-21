@@ -64,9 +64,21 @@ impl UInt32Array {
 
     /// The index at `i`. Does NOT check validity — caller must.
     pub fn value(&self, i: usize) -> u32 {
+        self.values()[i]
+    }
+
+    /// Typed access to the raw values, including null slots. Hoist this
+    /// once before a loop rather than calling `value(i)` per element —
+    /// `value(i)` re-derives this slice from the underlying buffer on every
+    /// call (the same cost `compute::arith`'s `value(i)` had; see that
+    /// module's doc comment).
+    pub fn values(&self) -> &[u32] {
         // SAFETY: validated once in `try_new`; `Buffer` is immutable.
-        let full = unsafe { self.values.typed_data_unchecked::<u32>() };
-        full[i]
+        unsafe { self.values.typed_data_unchecked::<u32>() }
+    }
+
+    pub fn validity(&self) -> Option<&Bitmap> {
+        self.validity.as_ref()
     }
 }
 

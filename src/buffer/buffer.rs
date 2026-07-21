@@ -80,6 +80,43 @@ impl Buffer {
         }
     }
 
+    /// Builds a `Buffer` from a `Vec<u8>` that already has `presumed_align_offset`
+    /// leading padding bytes ahead of its real content, as `MutableBuffer`
+    /// constructs (reserving `ALIGNMENT` extra bytes up front and computing
+    /// the padding needed so content starts aligned). When the allocation is
+    /// still aligned the way the caller expects — the overwhelmingly common
+    /// case, since `MutableBuffer` reserves accurate capacity up front — this
+    /// reuses `raw` directly with no copy. If `raw` reallocated to a
+    /// different address after the padding was computed (e.g. the caller
+    /// under-reserved and a later `push` grew the `Vec`), the presumed
+    /// padding no longer lines up with `ALIGNMENT`, and this falls back to
+    /// the same copying construction `from_vec` uses.
+    pub(crate) fn from_padded_vec(raw: Vec<u8>, presumed_align_offset: usize) -> Self {
+        let len = raw.len() - presumed_align_offset;
+        let ptr = raw.as_ptr() as usize;
+        let actual_align_offset = (ALIGNMENT - (ptr % ALIGNMENT)) % ALIGNMENT;
+        if actual_align_offset == presumed_align_offset {
+            return Buffer {
+                data: Arc::new(AlignedBytes {
+                    raw,
+                    align_offset: presumed_align_offset,
+                    len,
+                }),
+                offset: 0,
+                len,
+            };
+        }
+        let mut aligned = AlignedBytes::new(len);
+        aligned
+            .as_mut_slice()
+            .copy_from_slice(&raw[presumed_align_offset..]);
+        Buffer {
+            data: Arc::new(aligned),
+            offset: 0,
+            len,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }

@@ -16,6 +16,7 @@
 
 use crate::array::array::Array;
 use crate::array::boolean::{BooleanArray, BooleanBuilder};
+use crate::buffer::bit_at;
 use crate::error::{BasaltError, Result};
 
 pub fn and_kleene(lhs: &BooleanArray, rhs: &BooleanArray) -> Result<BooleanArray> {
@@ -34,14 +35,43 @@ pub fn or_kleene(lhs: &BooleanArray, rhs: &BooleanArray) -> Result<BooleanArray>
     })
 }
 
+/// Hoists a `BooleanArray`'s values bitmap, and its validity bitmap if it
+/// has one, into raw `(bytes, bit_offset)` pairs once — avoiding
+/// `Bitmap::get`'s `Buffer::as_slice()` re-derivation on every element in a
+/// loop. The bit-packed twin of `compute::arith`'s `value(i)` fix (see that
+/// module's doc comment).
+struct HoistedBoolean<'a> {
+    values: (&'a [u8], usize),
+    validity: Option<(&'a [u8], usize)>,
+}
+
+impl<'a> HoistedBoolean<'a> {
+    fn new(array: &'a BooleanArray) -> Self {
+        HoistedBoolean {
+            values: (array.values().as_bytes(), array.values().bit_offset()),
+            validity: array.validity().map(|v| (v.as_bytes(), v.bit_offset())),
+        }
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> Option<bool> {
+        if let Some((bytes, offset)) = self.validity {
+            if !bit_at(bytes, offset, i) {
+                return None;
+            }
+        }
+        Some(bit_at(self.values.0, self.values.1, i))
+    }
+}
+
 /// `NOT NULL` is `NULL` — negation never turns unknown into known.
 pub fn not_kleene(array: &BooleanArray) -> BooleanArray {
+    let hoisted = HoistedBoolean::new(array);
     let mut builder = BooleanBuilder::with_capacity(array.len());
     for i in 0..array.len() {
-        if array.is_null(i) {
-            builder.append_null();
-        } else {
-            builder.append_value(!array.value(i));
+        match hoisted.get(i) {
+            Some(v) => builder.append_value(!v),
+            None => builder.append_null(),
         }
     }
     builder.finish()
@@ -59,19 +89,11 @@ fn zip_kleene(
             rhs.len()
         )));
     }
+    let l = HoistedBoolean::new(lhs);
+    let r = HoistedBoolean::new(rhs);
     let mut builder = BooleanBuilder::with_capacity(lhs.len());
     for i in 0..lhs.len() {
-        let l = if lhs.is_null(i) {
-            None
-        } else {
-            Some(lhs.value(i))
-        };
-        let r = if rhs.is_null(i) {
-            None
-        } else {
-            Some(rhs.value(i))
-        };
-        match f(l, r) {
+        match f(l.get(i), r.get(i)) {
             Some(v) => builder.append_value(v),
             None => builder.append_null(),
         }

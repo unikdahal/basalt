@@ -34,3 +34,11 @@ criterion = "0.8.2"
 [[bench]]
 name = "row_vs_batch"
 harness = false
+
+[[bench]]
+name = "kernel_only"
+harness = false
+
+[[bench]]
+name = "tpch"
+harness = false

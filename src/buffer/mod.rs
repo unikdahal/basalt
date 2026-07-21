@@ -13,7 +13,7 @@ pub mod buffer;
 pub mod mutable;
 pub mod native;
 
-pub use bitmap::{Bitmap, BitmapBuilder};
+pub use bitmap::{bit_at, Bitmap, BitmapBuilder};
 pub use buffer::{Buffer, ALIGNMENT};
 pub use mutable::MutableBuffer;
 pub use native::NativeType;

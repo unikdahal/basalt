@@ -24,6 +24,7 @@
 
 use crate::array::array::{as_boolean, as_primitive, as_string, ArrayRef};
 use crate::array::types::{Float64Type, Int64Type};
+use crate::buffer::bit_at;
 use crate::compute::index::{UInt32Array, UInt32Builder};
 use crate::error::{BasaltError, Result};
 use crate::types::data_type::DataType;
@@ -51,27 +52,28 @@ pub fn lexsort_to_indices(columns: &[SortColumn]) -> Result<UInt32Array> {
         }
     }
 
+    // Downcasting and deriving each column's values/validity slice happens
+    // here, once, rather than inside the `O(n log n)` comparator below —
+    // `compare_at` used to re-downcast (`as_primitive`/`as_string`/
+    // `as_boolean`) and re-derive `value(i)`/`value(j)` (each walking
+    // `Buffer::as_slice()` from scratch) on *every* comparison call, the
+    // same class of bug `compute::arith`'s `value(i)` had (see that
+    // module's doc comment).
+    let hoisted: Vec<HoistedColumn> = columns
+        .iter()
+        .map(HoistedColumn::new)
+        .collect::<Result<_>>()?;
+
     let mut indices: Vec<u32> = (0..num_rows as u32).collect();
-    let mut sort_err = None;
     indices.sort_by(|&i, &j| {
-        if sort_err.is_some() {
-            return std::cmp::Ordering::Equal;
-        }
-        for column in columns {
-            match compare_at(column, i as usize, j as usize) {
-                Ok(std::cmp::Ordering::Equal) => continue,
-                Ok(ord) => return ord,
-                Err(e) => {
-                    sort_err = Some(e);
-                    return std::cmp::Ordering::Equal;
-                }
+        for column in &hoisted {
+            let ord = column.compare(i as usize, j as usize);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
             }
         }
         std::cmp::Ordering::Equal
     });
-    if let Some(e) = sort_err {
-        return Err(e);
-    }
 
     let mut builder = UInt32Builder::with_capacity(indices.len());
     for i in indices {
@@ -80,64 +82,104 @@ pub fn lexsort_to_indices(columns: &[SortColumn]) -> Result<UInt32Array> {
     Ok(builder.finish())
 }
 
-fn compare_at(column: &SortColumn, i: usize, j: usize) -> Result<std::cmp::Ordering> {
-    use std::cmp::Ordering::*;
-    let array = column.values.as_ref();
-    let (i_null, j_null) = (array.is_null(i), array.is_null(j));
-    if i_null || j_null {
-        return Ok(match (i_null, j_null) {
-            (true, true) => Equal,
-            (true, false) => {
-                if column.options.nulls_first {
-                    Less
-                } else {
-                    Greater
+/// Per-type hoisted access, built once per column before the sort's inner
+/// loop runs. `Utf8` still calls `StringArray::value(i)` per comparison
+/// (that type's own internal buffer re-derivation is a separate, un-fixed
+/// cost — out of scope here), but at least pays the downcast once instead
+/// of on every comparison.
+enum HoistedValues<'a> {
+    Int64(&'a [i64]),
+    Float64(&'a [f64]),
+    Utf8(&'a crate::array::string::StringArray),
+    Boolean { bytes: &'a [u8], bit_offset: usize },
+}
+
+struct HoistedColumn<'a> {
+    values: HoistedValues<'a>,
+    validity: Option<(&'a [u8], usize)>,
+    options: SortOptions,
+}
+
+impl<'a> HoistedColumn<'a> {
+    fn new(column: &'a SortColumn) -> Result<Self> {
+        let array = column.values.as_ref();
+        let validity = array.validity().map(|v| (v.as_bytes(), v.bit_offset()));
+        let values = match array.data_type() {
+            DataType::Int64 => HoistedValues::Int64(as_primitive::<Int64Type>(array)?.values()),
+            DataType::Float64 => {
+                HoistedValues::Float64(as_primitive::<Float64Type>(array)?.values())
+            }
+            DataType::Utf8 => HoistedValues::Utf8(as_string(array)?),
+            DataType::Boolean => {
+                let b = as_boolean(array)?;
+                HoistedValues::Boolean {
+                    bytes: b.values().as_bytes(),
+                    bit_offset: b.values().bit_offset(),
                 }
             }
-            (false, true) => {
-                if column.options.nulls_first {
-                    Greater
-                } else {
-                    Less
-                }
-            }
-            (false, false) => unreachable!(),
-        });
+        };
+        Ok(HoistedColumn {
+            values,
+            validity,
+            options: column.options,
+        })
     }
 
-    let ord = match array.data_type() {
-        DataType::Int64 => {
-            let a = as_primitive::<Int64Type>(array)?;
-            a.value(i).cmp(&a.value(j))
-        }
-        DataType::Float64 => {
-            let a = as_primitive::<Float64Type>(array)?;
-            // NaN policy: sorts as greater than everything, including
-            // itself compared to itself (Equal) — matching
-            // `exec::ops::compare_values`'s documented Phase 1 policy so
-            // sort behavior is consistent across both engine generations.
-            let (x, y) = (a.value(i), a.value(j));
-            match (x.is_nan(), y.is_nan()) {
+    fn is_null(&self, i: usize) -> bool {
+        self.validity
+            .is_some_and(|(bytes, offset)| !bit_at(bytes, offset, i))
+    }
+
+    fn compare(&self, i: usize, j: usize) -> std::cmp::Ordering {
+        use std::cmp::Ordering::*;
+        let (i_null, j_null) = (self.is_null(i), self.is_null(j));
+        if i_null || j_null {
+            return match (i_null, j_null) {
                 (true, true) => Equal,
-                (true, false) => Greater,
-                (false, true) => Less,
-                (false, false) => x.partial_cmp(&y).unwrap_or(Equal),
+                (true, false) => {
+                    if self.options.nulls_first {
+                        Less
+                    } else {
+                        Greater
+                    }
+                }
+                (false, true) => {
+                    if self.options.nulls_first {
+                        Greater
+                    } else {
+                        Less
+                    }
+                }
+                (false, false) => unreachable!(),
+            };
+        }
+
+        let ord = match &self.values {
+            HoistedValues::Int64(values) => values[i].cmp(&values[j]),
+            HoistedValues::Float64(values) => {
+                // NaN policy: sorts as greater than everything, including
+                // itself compared to itself (Equal) — matching
+                // `exec::ops::compare_values`'s documented Phase 1 policy so
+                // sort behavior is consistent across both engine generations.
+                let (x, y) = (values[i], values[j]);
+                match (x.is_nan(), y.is_nan()) {
+                    (true, true) => Equal,
+                    (true, false) => Greater,
+                    (false, true) => Less,
+                    (false, false) => x.partial_cmp(&y).unwrap_or(Equal),
+                }
             }
+            HoistedValues::Utf8(a) => a.value(i).cmp(a.value(j)),
+            HoistedValues::Boolean { bytes, bit_offset } => {
+                bit_at(bytes, *bit_offset, i).cmp(&bit_at(bytes, *bit_offset, j))
+            }
+        };
+        if self.options.descending {
+            ord.reverse()
+        } else {
+            ord
         }
-        DataType::Utf8 => {
-            let a = as_string(array)?;
-            a.value(i).cmp(a.value(j))
-        }
-        DataType::Boolean => {
-            let a = as_boolean(array)?;
-            a.value(i).cmp(&a.value(j))
-        }
-    };
-    Ok(if column.options.descending {
-        ord.reverse()
-    } else {
-        ord
-    })
+    }
 }
 
 #[cfg(test)]

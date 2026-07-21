@@ -8,10 +8,17 @@
 //! `Float64` comparison reaching here uncast is a binder bug, and this
 //! module reports it as a type error rather than guessing.
 //!
-//! Like `arith.rs`, this pass always materializes scalar operands via
-//! `ColumnarValue::into_array` rather than the LLD's three-entry-point
-//! shape; see that module's doc comment for the reasoning.
+//! **Array⊕scalar and scalar⊕array take a dedicated fast path for `Int64`
+//! and `Float64`** that never materializes the scalar into a full array and
+//! never re-derives `values()`'s slice per element — the exact two bugs
+//! `compute::arith` had (see that module's doc comment for the full story).
+//! They were found here via `benches/tpch.rs`: a filter with several scalar
+//! comparisons chained by `AND` ran *slower* on Phase 2 than Phase 1's
+//! row-at-a-time interpreter, tracing back to this module still doing what
+//! `arith.rs` used to. `Utf8`/`Boolean` comparisons keep the general,
+//! materializing path below.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use super::ColumnarValue;
@@ -76,14 +83,112 @@ fn compare(
     ord_matches: impl Fn(std::cmp::Ordering) -> bool,
     which: ScalarEq,
 ) -> Result<ColumnarValue> {
-    if let (ColumnarValue::Scalar(l), ColumnarValue::Scalar(r)) = (lhs, rhs) {
-        return Ok(ColumnarValue::Scalar(scalar_compare(l, r, which)?));
+    match (lhs, rhs) {
+        (ColumnarValue::Scalar(l), ColumnarValue::Scalar(r)) => {
+            Ok(ColumnarValue::Scalar(scalar_compare(l, r, which)?))
+        }
+        (ColumnarValue::Array(l), ColumnarValue::Scalar(r)) => {
+            if let Some(result) = array_scalar_compare(l.as_ref(), r, &ord_matches, false)? {
+                return Ok(result);
+            }
+            compare_general(lhs, rhs, ord_matches)
+        }
+        (ColumnarValue::Scalar(l), ColumnarValue::Array(r)) => {
+            if let Some(result) = array_scalar_compare(r.as_ref(), l, &ord_matches, true)? {
+                return Ok(result);
+            }
+            compare_general(lhs, rhs, ord_matches)
+        }
+        (ColumnarValue::Array(_), ColumnarValue::Array(_)) => {
+            compare_general(lhs, rhs, ord_matches)
+        }
     }
+}
 
+/// Dedicated `Int64`/`Float64` array⊕scalar (or scalar⊕array, via
+/// `scalar_on_left`) fast path: never materializes the scalar into a full
+/// array via `into_array`, and hoists `values()` once instead of calling
+/// `value(i)` per element — the same two bugs `compute::arith` had before
+/// its own fast path (see that module's doc comment). Found here via
+/// `benches/tpch.rs`: this module still did both, and a filter with several
+/// scalar comparisons chained by `AND` ran *slower* on Phase 2 than on
+/// Phase 1's row-at-a-time interpreter before this fix. Returns `Ok(None)`
+/// for any type this fast path doesn't cover (`Utf8`, `Boolean`, or a null
+/// scalar with a type mismatch), falling back to the general path.
+fn array_scalar_compare(
+    array: &dyn Array,
+    scalar: &ScalarValue,
+    ord_matches: &impl Fn(Ordering) -> bool,
+    scalar_on_left: bool,
+) -> Result<Option<ColumnarValue>> {
+    let num_rows = array.len();
+    match (array.data_type(), scalar) {
+        (DataType::Int64, ScalarValue::Int64(s)) => {
+            let a = as_primitive::<Int64Type>(array)?;
+            let mut builder = BooleanBuilder::with_capacity(num_rows);
+            let Some(s) = *s else {
+                for _ in 0..num_rows {
+                    builder.append_null();
+                }
+                return Ok(Some(ColumnarValue::Array(Arc::new(builder.finish()))));
+            };
+            let values = a.values();
+            for (i, &v) in values.iter().enumerate() {
+                if a.is_null(i) {
+                    builder.append_null();
+                    continue;
+                }
+                let ord = if scalar_on_left { s.cmp(&v) } else { v.cmp(&s) };
+                builder.append_value(ord_matches(ord));
+            }
+            Ok(Some(ColumnarValue::Array(Arc::new(builder.finish()))))
+        }
+        (DataType::Float64, ScalarValue::Float64(s)) => {
+            let a = as_primitive::<Float64Type>(array)?;
+            let mut builder = BooleanBuilder::with_capacity(num_rows);
+            let Some(s) = *s else {
+                for _ in 0..num_rows {
+                    builder.append_null();
+                }
+                return Ok(Some(ColumnarValue::Array(Arc::new(builder.finish()))));
+            };
+            let values = a.values();
+            for (i, &v) in values.iter().enumerate() {
+                if a.is_null(i) {
+                    builder.append_null();
+                    continue;
+                }
+                let ord = if scalar_on_left {
+                    s.partial_cmp(&v)
+                } else {
+                    v.partial_cmp(&s)
+                };
+                match ord {
+                    // NaN compares false to everything, per IEEE-754 — no
+                    // special-casing here, matching Phase 1's eval.
+                    Some(o) => builder.append_value(ord_matches(o)),
+                    None => builder.append_value(false),
+                }
+            }
+            Ok(Some(ColumnarValue::Array(Arc::new(builder.finish()))))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// General path: materializes both sides via `into_array` (a no-op when
+/// both are already arrays) and hoists `values()`/bitmap access once before
+/// each per-element loop. Used for `Utf8`/`Boolean` scalar comparisons and
+/// all array⊕array comparisons.
+fn compare_general(
+    lhs: &ColumnarValue,
+    rhs: &ColumnarValue,
+    ord_matches: impl Fn(std::cmp::Ordering) -> bool,
+) -> Result<ColumnarValue> {
     let num_rows = match (lhs, rhs) {
         (ColumnarValue::Array(a), _) => a.len(),
         (_, ColumnarValue::Array(a)) => a.len(),
-        _ => unreachable!("both-scalar case handled above"),
+        _ => unreachable!("both-scalar case handled by `compare`"),
     };
     let lhs_array = lhs.clone().into_array(num_rows)?;
     let rhs_array = rhs.clone().into_array(num_rows)?;
@@ -106,23 +211,25 @@ fn compare(
         DataType::Int64 => {
             let l = as_primitive::<Int64Type>(lhs_array.as_ref())?;
             let r = as_primitive::<Int64Type>(rhs_array.as_ref())?;
+            let (l_values, r_values) = (l.values(), r.values());
             for i in 0..num_rows {
                 if l.is_null(i) || r.is_null(i) {
                     builder.append_null();
                 } else {
-                    builder.append_value(ord_matches(l.value(i).cmp(&r.value(i))));
+                    builder.append_value(ord_matches(l_values[i].cmp(&r_values[i])));
                 }
             }
         }
         DataType::Float64 => {
             let l = as_primitive::<Float64Type>(lhs_array.as_ref())?;
             let r = as_primitive::<Float64Type>(rhs_array.as_ref())?;
+            let (l_values, r_values) = (l.values(), r.values());
             for i in 0..num_rows {
                 if l.is_null(i) || r.is_null(i) {
                     builder.append_null();
                     continue;
                 }
-                match l.value(i).partial_cmp(&r.value(i)) {
+                match l_values[i].partial_cmp(&r_values[i]) {
                     // NaN compares false to everything, per IEEE-754 — no
                     // special-casing here, matching Phase 1's eval.
                     Some(o) => builder.append_value(ord_matches(o)),
@@ -144,11 +251,15 @@ fn compare(
         DataType::Boolean => {
             let l = crate::array::array::as_boolean(lhs_array.as_ref())?;
             let r = crate::array::array::as_boolean(rhs_array.as_ref())?;
+            let (l_bytes, l_offset) = (l.values().as_bytes(), l.values().bit_offset());
+            let (r_bytes, r_offset) = (r.values().as_bytes(), r.values().bit_offset());
             for i in 0..num_rows {
                 if l.is_null(i) || r.is_null(i) {
                     builder.append_null();
                 } else {
-                    builder.append_value(ord_matches(l.value(i).cmp(&r.value(i))));
+                    let ord = crate::buffer::bit_at(l_bytes, l_offset, i)
+                        .cmp(&crate::buffer::bit_at(r_bytes, r_offset, i));
+                    builder.append_value(ord_matches(ord));
                 }
             }
         }
@@ -228,6 +339,69 @@ mod tests {
         assert!(result.value(0));
         assert!(!result.value(1));
         assert!(result.value(2));
+    }
+
+    #[test]
+    fn array_scalar_fast_path_matches_array_array_result() {
+        let lhs = int_array(&[Some(1), Some(5), Some(9), None]);
+        let rhs_array = int_array(&[Some(5), Some(5), Some(5), Some(5)]);
+        let rhs_scalar = ColumnarValue::Scalar(ScalarValue::Int64(Some(5)));
+
+        for op in [lt, lteq, gt, gteq, eq, neq] {
+            let via_array = op(&lhs, &rhs_array).unwrap();
+            let via_scalar = op(&lhs, &rhs_scalar).unwrap();
+            assert_eq!(
+                as_bool_array(&via_array).len(),
+                as_bool_array(&via_scalar).len()
+            );
+            for i in 0..4 {
+                assert_eq!(
+                    as_bool_array(&via_array).is_null(i),
+                    as_bool_array(&via_scalar).is_null(i)
+                );
+                if !as_bool_array(&via_array).is_null(i) {
+                    assert_eq!(
+                        as_bool_array(&via_array).value(i),
+                        as_bool_array(&via_scalar).value(i)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_lt_array_preserves_operand_order() {
+        // Regression test for the array⊕scalar fast path: `<`/`>` aren't
+        // symmetric, so `5 < col` must not silently become `col < 5`.
+        let lhs = ColumnarValue::Scalar(ScalarValue::Int64(Some(5)));
+        let rhs = int_array(&[Some(1), Some(10)]);
+        let result = lt(&lhs, &rhs).unwrap();
+        let result = as_bool_array(&result);
+        assert!(!result.value(0)); // 5 < 1 -> false
+        assert!(result.value(1)); // 5 < 10 -> true
+    }
+
+    #[test]
+    fn array_eq_null_scalar_is_all_null() {
+        let lhs = int_array(&[Some(1), Some(2)]);
+        let rhs = ColumnarValue::Scalar(ScalarValue::Int64(None));
+        let result = eq(&lhs, &rhs).unwrap();
+        let result = as_bool_array(&result);
+        assert!(result.is_null(0));
+        assert!(result.is_null(1));
+    }
+
+    #[test]
+    fn float_array_scalar_fast_path_handles_nan() {
+        let mut b = PrimitiveBuilder::<Float64Type>::with_capacity(2);
+        b.append_value(f64::NAN);
+        b.append_value(1.0);
+        let lhs = ColumnarValue::Array(Arc::new(b.finish()));
+        let rhs = ColumnarValue::Scalar(ScalarValue::Float64(Some(1.0)));
+        let result = eq(&lhs, &rhs).unwrap();
+        let result = as_bool_array(&result);
+        assert!(!result.value(0));
+        assert!(result.value(1));
     }
 
     #[test]

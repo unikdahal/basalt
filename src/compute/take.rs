@@ -34,37 +34,53 @@ pub fn take(array: &dyn Array, indices: &UInt32Array) -> Result<ArrayRef> {
     }
 }
 
-fn check_bounds(indices: &UInt32Array, len: usize) -> Result<()> {
-    for i in 0..indices.len() {
-        if indices.is_null(i) {
+/// A hoisted bitmap: `(bytes, bit_offset)`, indexable via `buffer::bit_at`.
+type HoistedBitmap<'a> = (&'a [u8], usize);
+
+/// Validates bounds while also handing back the hoisted `(u32 values,
+/// validity)` the caller's gather loop needs — one pass over `indices`
+/// instead of two, and `indices.values()` derived once instead of via
+/// `indices.value(i)` (which re-derives its slice from the underlying
+/// buffer every call) on every element of both the check and the gather.
+fn checked_indices(
+    indices: &UInt32Array,
+    len: usize,
+) -> Result<(&[u32], Option<HoistedBitmap<'_>>)> {
+    let values = indices.values();
+    let validity = indices.validity().map(|v| (v.as_bytes(), v.bit_offset()));
+    for (i, &idx) in values.iter().enumerate() {
+        let is_null =
+            validity.is_some_and(|(bytes, offset)| !crate::buffer::bit_at(bytes, offset, i));
+        if is_null {
             continue;
         }
-        let idx = indices.value(i) as usize;
-        if idx >= len {
+        if idx as usize >= len {
             return Err(BasaltError::Internal(format!(
                 "take index {idx} out of bounds for array of length {len}"
             )));
         }
     }
-    Ok(())
+    Ok((values, validity))
 }
 
 fn take_primitive<T: ArrowPrimitiveType>(
     array: &crate::array::primitive::PrimitiveArray<T>,
     indices: &UInt32Array,
 ) -> Result<ArrayRef> {
-    check_bounds(indices, array.len())?;
+    let (idx_values, idx_validity) = checked_indices(indices, array.len())?;
+    let source = array.values();
+    let src_validity = array.validity().map(|v| (v.as_bytes(), v.bit_offset()));
     let mut builder = PrimitiveBuilder::<T>::with_capacity(indices.len());
-    for i in 0..indices.len() {
-        if indices.is_null(i) {
+    for (i, &idx) in idx_values.iter().enumerate() {
+        if idx_validity.is_some_and(|(bytes, offset)| !crate::buffer::bit_at(bytes, offset, i)) {
             builder.append_null();
             continue;
         }
-        let idx = indices.value(i) as usize;
-        if array.is_null(idx) {
+        let idx = idx as usize;
+        if src_validity.is_some_and(|(bytes, offset)| !crate::buffer::bit_at(bytes, offset, idx)) {
             builder.append_null();
         } else {
-            builder.append_value(array.value(idx));
+            builder.append_value(source[idx]);
         }
     }
     Ok(Arc::new(builder.finish()))
@@ -74,18 +90,20 @@ fn take_boolean(
     array: &crate::array::boolean::BooleanArray,
     indices: &UInt32Array,
 ) -> Result<ArrayRef> {
-    check_bounds(indices, array.len())?;
+    let (idx_values, idx_validity) = checked_indices(indices, array.len())?;
+    let (src_bytes, src_offset) = (array.values().as_bytes(), array.values().bit_offset());
+    let src_validity = array.validity().map(|v| (v.as_bytes(), v.bit_offset()));
     let mut builder = BooleanBuilder::with_capacity(indices.len());
-    for i in 0..indices.len() {
-        if indices.is_null(i) {
+    for (i, &idx) in idx_values.iter().enumerate() {
+        if idx_validity.is_some_and(|(bytes, offset)| !crate::buffer::bit_at(bytes, offset, i)) {
             builder.append_null();
             continue;
         }
-        let idx = indices.value(i) as usize;
-        if array.is_null(idx) {
+        let idx = idx as usize;
+        if src_validity.is_some_and(|(bytes, offset)| !crate::buffer::bit_at(bytes, offset, idx)) {
             builder.append_null();
         } else {
-            builder.append_value(array.value(idx));
+            builder.append_value(crate::buffer::bit_at(src_bytes, src_offset, idx));
         }
     }
     Ok(Arc::new(builder.finish()))
@@ -95,14 +113,14 @@ fn take_string(
     array: &crate::array::string::StringArray,
     indices: &UInt32Array,
 ) -> Result<ArrayRef> {
-    check_bounds(indices, array.len())?;
+    let (idx_values, idx_validity) = checked_indices(indices, array.len())?;
     let mut builder = StringBuilder::with_capacity(indices.len(), 0);
-    for i in 0..indices.len() {
-        if indices.is_null(i) {
+    for (i, &idx) in idx_values.iter().enumerate() {
+        if idx_validity.is_some_and(|(bytes, offset)| !crate::buffer::bit_at(bytes, offset, i)) {
             builder.append_null();
             continue;
         }
-        let idx = indices.value(i) as usize;
+        let idx = idx as usize;
         if array.is_null(idx) {
             builder.append_null();
         } else {
