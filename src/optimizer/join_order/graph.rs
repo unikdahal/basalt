@@ -113,11 +113,78 @@ impl JoinGraph {
             Some(current)
         })
     }
+
+    /// Iterates every nonempty submask of `mask`, **including `mask`
+    /// itself** — unlike `sub_masks`, which excludes the full set because
+    /// it's enumerating *split points* of an already-known set. `DPccp`
+    /// (§7.3) uses this to enumerate which neighbors to add when growing a
+    /// connected subgraph.
+    pub fn all_nonempty_submasks(mask: RelationSet) -> impl Iterator<Item = RelationSet> {
+        let mut next = Some(mask);
+        std::iter::from_fn(move || {
+            let current = next?;
+            if current == 0 {
+                next = None;
+                return None;
+            }
+            next = if current == 0 { None } else { Some((current.wrapping_sub(1)) & mask) };
+            Some(current)
+        })
+    }
+
+    /// Every relation directly connected to some relation in `s` via an
+    /// edge, excluding `s` itself — the frontier `DPccp`'s connected-subgraph
+    /// enumeration grows into.
+    pub fn neighbors(&self, s: RelationSet) -> RelationSet {
+        let mut result = 0u64;
+        for e in &self.edges {
+            let (l, r) = (singleton(e.left_relation), singleton(e.right_relation));
+            if l & s != 0 {
+                result |= r;
+            }
+            if r & s != 0 {
+                result |= l;
+            }
+        }
+        result & !s
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_nonempty_submasks_includes_the_mask_itself_and_excludes_zero() {
+        let subs: Vec<RelationSet> = JoinGraph::all_nonempty_submasks(0b101).collect();
+        assert!(subs.contains(&0b101));
+        assert!(!subs.contains(&0));
+        assert_eq!(subs.len(), 3); // {01, 100, 101}
+    }
+
+    #[test]
+    fn all_nonempty_submasks_of_a_single_bit_yields_only_itself() {
+        let subs: Vec<RelationSet> = JoinGraph::all_nonempty_submasks(0b100).collect();
+        assert_eq!(subs, vec![0b100]);
+    }
+
+    #[test]
+    fn all_nonempty_submasks_of_zero_yields_nothing() {
+        let subs: Vec<RelationSet> = JoinGraph::all_nonempty_submasks(0).collect();
+        assert!(subs.is_empty());
+    }
+
+    #[test]
+    fn neighbors_excludes_the_set_itself_and_finds_both_directions() {
+        let edges = vec![
+            JoinEdge { left_relation: 0, left_column: 0, right_relation: 1, right_column: 0 },
+            JoinEdge { left_relation: 2, left_column: 0, right_relation: 1, right_column: 0 },
+        ];
+        let graph = JoinGraph { relations: vec![], edges };
+        assert_eq!(graph.neighbors(singleton(1)), singleton(0) | singleton(2));
+        assert_eq!(graph.neighbors(singleton(0)), singleton(1));
+        assert_eq!(graph.neighbors(singleton(0) | singleton(1)), singleton(2));
+    }
 
     #[test]
     fn singleton_and_full_set_are_correct_bitmasks() {
