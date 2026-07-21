@@ -60,6 +60,9 @@ fn write_indented(
         LogicalPlan::Limit { skip, fetch, .. } => {
             writeln!(f, "{indent}Limit: skip={skip} fetch={fetch:?}")?;
         }
+        LogicalPlan::EmptyRelation { .. } => {
+            writeln!(f, "{indent}EmptyRelation")?;
+        }
     }
     for input in plan.inputs() {
         write_indented(input, f, depth + 1)?;

@@ -119,6 +119,11 @@ pub enum LogicalPlan {
         skip: usize,
         fetch: Option<usize>,
     },
+    /// Produces zero rows with the given schema — what `EliminateFilter`
+    /// (Phase 3) replaces a provably-`WHERE false` subtree with, carrying
+    /// the right schema forward so the rest of the plan above it still
+    /// type-checks. See design-docs/basalt-phase3-lld.md §5.3.
+    EmptyRelation { schema: SchemaRef },
 }
 
 impl LogicalPlan {
@@ -127,7 +132,8 @@ impl LogicalPlan {
             LogicalPlan::TableScan { schema, .. }
             | LogicalPlan::Projection { schema, .. }
             | LogicalPlan::Aggregate { schema, .. }
-            | LogicalPlan::Join { schema, .. } => schema,
+            | LogicalPlan::Join { schema, .. }
+            | LogicalPlan::EmptyRelation { schema } => schema,
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => input.schema(),
@@ -136,7 +142,7 @@ impl LogicalPlan {
 
     pub fn inputs(&self) -> Vec<&LogicalPlan> {
         match self {
-            LogicalPlan::TableScan { .. } => vec![],
+            LogicalPlan::TableScan { .. } | LogicalPlan::EmptyRelation { .. } => vec![],
             LogicalPlan::Projection { input, .. }
             | LogicalPlan::Filter { input, .. }
             | LogicalPlan::Aggregate { input, .. }
@@ -164,10 +170,10 @@ impl LogicalPlan {
         }
 
         match self {
-            LogicalPlan::TableScan { .. } => {
+            LogicalPlan::TableScan { .. } | LogicalPlan::EmptyRelation { .. } => {
                 if !inputs.is_empty() {
                     return Err(BasaltError::Internal(format!(
-                        "TableScan takes 0 inputs, got {}",
+                        "{self:?} takes 0 inputs, got {}",
                         inputs.len()
                     )));
                 }

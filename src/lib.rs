@@ -20,14 +20,18 @@ pub mod batch;
 pub mod buffer;
 pub mod compute;
 pub mod exec;
+pub mod explain;
 pub mod expr;
 pub mod io;
 pub mod logical_plan;
+pub mod optimizer;
 pub mod physical_expr;
 pub mod physical_plan;
 pub mod plan;
+pub mod pruning;
 pub mod scalar;
 pub mod sql;
+pub mod statistics;
 pub mod types;
 
 pub use error::{BasaltError, Result};
