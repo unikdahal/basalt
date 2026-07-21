@@ -17,6 +17,8 @@ name = "basalt"
 path = "src/lib.rs"
 
 [dependencies]
+arrow = "59.1.0"
+parquet = "59.1.0"
 thiserror = "1"
 
 [profile.release]
