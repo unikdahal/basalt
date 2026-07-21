@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use super::plan::{AggregateFunction, JoinType, LogicalPlan, SortExpr, TableSource};
+use super::plan::{AggregateFunction, AggregateKind, JoinType, LogicalPlan, SortExpr, TableSource};
 use crate::error::Result;
 use crate::expr::expr::Expr;
 use crate::types::schema::{Field, Schema, SchemaRef};
@@ -71,11 +71,29 @@ impl LogicalPlanBuilder {
             ));
         }
         for agg in &aggr_expr {
-            let data_type = match &agg.arg {
-                Some(e) => e.data_type()?,
-                None => crate::types::data_type::DataType::Int64, // COUNT(*)
+            // Per-kind output type, not the argument's own type: COUNT
+            // always outputs Int64 regardless of what it's counting, and
+            // AVG always outputs Float64 even over an Int64 column — using
+            // `agg.arg.data_type()` directly here would be wrong for both.
+            // Only SUM/MIN/MAX genuinely pass the argument's type through.
+            let data_type = match agg.kind {
+                AggregateKind::Count => crate::types::data_type::DataType::Int64,
+                AggregateKind::Avg => crate::types::data_type::DataType::Float64,
+                AggregateKind::Sum | AggregateKind::Min | AggregateKind::Max => match &agg.arg {
+                    Some(e) => e.data_type()?,
+                    None => {
+                        return Err(crate::error::BasaltError::Internal(format!(
+                            "{:?} requires an argument expression",
+                            agg.kind
+                        )))
+                    }
+                },
             };
-            fields.push(Field::new(agg.output_name.clone(), data_type, false));
+            // COUNT never produces NULL (0 over empty/all-null input); every
+            // other aggregate can (SUM/AVG/MIN/MAX of an all-null group is
+            // NULL, not 0) — see accumulator.rs's null-semantics doc comment.
+            let nullable = agg.kind != AggregateKind::Count;
+            fields.push(Field::new(agg.output_name.clone(), data_type, nullable));
         }
         let schema = Arc::new(Schema::new(fields)?);
         Ok(LogicalPlanBuilder {
@@ -214,6 +232,58 @@ mod tests {
             .build();
         assert_eq!(plan.schema().field(0).unwrap().name, "id");
         assert_eq!(plan.schema().field(0).unwrap().data_type, DataType::Int64);
+    }
+
+    /// Regression test: a prior version used the aggregate argument's own
+    /// type as the output type, which is wrong for AVG (always Float64,
+    /// even over an Int64 column) and COUNT (always Int64, regardless of
+    /// what's being counted). Also checks COUNT is the only non-nullable
+    /// aggregate output — SUM/AVG/MIN/MAX of an all-null group is NULL.
+    #[test]
+    fn aggregate_output_types_are_per_kind_not_the_argument_type() {
+        let id_col = Expr::Column {
+            index: 0,
+            data_type: DataType::Int64,
+            nullable: false,
+        };
+        let plan = LogicalPlanBuilder::scan("t", source())
+            .aggregate(
+                vec![],
+                vec![
+                    AggregateFunction {
+                        output_name: "avg_id".to_string(),
+                        kind: AggregateKind::Avg,
+                        arg: Some(id_col.clone()),
+                    },
+                    AggregateFunction {
+                        output_name: "cnt".to_string(),
+                        kind: AggregateKind::Count,
+                        arg: Some(id_col.clone()),
+                    },
+                    AggregateFunction {
+                        output_name: "cnt_star".to_string(),
+                        kind: AggregateKind::Count,
+                        arg: None,
+                    },
+                    AggregateFunction {
+                        output_name: "sum_id".to_string(),
+                        kind: AggregateKind::Sum,
+                        arg: Some(id_col),
+                    },
+                ],
+            )
+            .unwrap()
+            .build();
+
+        let schema = plan.schema();
+        assert_eq!(schema.field(0).unwrap().data_type, DataType::Float64); // avg_id
+        assert!(schema.field(0).unwrap().nullable);
+        assert_eq!(schema.field(1).unwrap().data_type, DataType::Int64); // cnt
+        assert!(!schema.field(1).unwrap().nullable);
+        assert_eq!(schema.field(2).unwrap().data_type, DataType::Int64); // cnt_star
+        assert!(!schema.field(2).unwrap().nullable);
+        assert_eq!(schema.field(3).unwrap().data_type, DataType::Int64); // sum_id
+        assert!(schema.field(3).unwrap().nullable);
     }
 
     #[test]

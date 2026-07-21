@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use super::aggregate::AggregateExec;
 use super::filter::FilterExec;
 use super::limit::LimitExec;
 use super::plan::ExecutionPlanRef;
@@ -82,9 +83,49 @@ impl PhysicalPlanner {
             LogicalPlan::Sort { .. } => Err(BasaltError::Internal(
                 "Sort physical planning: see physical_plan::sort".to_string(),
             )),
-            LogicalPlan::Aggregate { .. } => Err(BasaltError::Internal(
-                "Aggregate physical planning: see physical_plan::aggregate".to_string(),
-            )),
+            LogicalPlan::Aggregate {
+                input,
+                group_expr,
+                aggr_expr,
+                schema,
+            } => {
+                let child = self.create_physical_plan(input)?;
+                let group_exprs = group_expr
+                    .iter()
+                    .map(|e| self.create_physical_expr(e))
+                    .collect::<Result<Vec<_>>>()?;
+                let group_types = group_expr
+                    .iter()
+                    .map(Expr::data_type)
+                    .collect::<Result<Vec<_>>>()?;
+
+                let mut agg_arg_exprs = Vec::with_capacity(aggr_expr.len());
+                let mut agg_kinds = Vec::with_capacity(aggr_expr.len());
+                let mut agg_arg_types = Vec::with_capacity(aggr_expr.len());
+                for agg in aggr_expr {
+                    agg_kinds.push(agg.kind);
+                    match &agg.arg {
+                        Some(e) => {
+                            agg_arg_exprs.push(Some(self.create_physical_expr(e)?));
+                            agg_arg_types.push(e.data_type()?);
+                        }
+                        None => {
+                            agg_arg_exprs.push(None);
+                            agg_arg_types.push(DataType::Int64); // unused for COUNT(*)
+                        }
+                    }
+                }
+
+                Ok(Arc::new(AggregateExec::new(
+                    child,
+                    group_exprs,
+                    group_types,
+                    agg_arg_exprs,
+                    agg_kinds,
+                    agg_arg_types,
+                    schema.clone(),
+                )))
+            }
             LogicalPlan::Join { .. } => Err(BasaltError::Internal(
                 "Join physical planning: see physical_plan::join".to_string(),
             )),
@@ -224,6 +265,39 @@ mod tests {
             .collect();
         // a > 2 -> [3,4,5]; * 10 -> [30,40,50]; limit 2 -> [30,40]
         assert_eq!(values, vec![30, 40]);
+    }
+
+    #[test]
+    fn end_to_end_scan_then_aggregate() {
+        let source = Arc::new(MemoryTableSource::new(
+            schema(),
+            vec![source_batch(&[1, 2, 3, 4, 5])],
+        ));
+        let logical = LogicalPlanBuilder::scan("t", source)
+            .aggregate(
+                vec![],
+                vec![crate::logical_plan::AggregateFunction {
+                    output_name: "total".to_string(),
+                    kind: crate::logical_plan::AggregateKind::Sum,
+                    arg: Some(Expr::Column {
+                        index: 0,
+                        data_type: DataType::Int64,
+                        nullable: false,
+                    }),
+                }],
+            )
+            .unwrap()
+            .build();
+
+        let physical = PhysicalPlanner.create_physical_plan(&logical).unwrap();
+        let batches: Vec<_> = physical
+            .execute(0)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        let col = as_primitive::<Int64Type>(batches[0].column(0).unwrap().as_ref()).unwrap();
+        assert_eq!(col.value(0), 15);
     }
 
     #[test]
