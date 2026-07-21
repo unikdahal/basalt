@@ -10,6 +10,7 @@ pub mod planner;
 pub mod projection;
 pub mod scan;
 pub mod sort;
+pub mod spill;
 
 pub use plan::{BatchStream, ExecutionPlan, ExecutionPlanRef, Metrics, Partitioning};
 pub use planner::PhysicalPlanner;
