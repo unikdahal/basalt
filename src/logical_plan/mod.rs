@@ -4,6 +4,7 @@ pub mod builder;
 pub mod display;
 pub mod plan;
 
+pub use builder::LogicalPlanBuilder;
 pub use plan::{
     AggregateFunction, AggregateKind, JoinType, LogicalPlan, SortExpr, SortOptions, TableSource,
 };

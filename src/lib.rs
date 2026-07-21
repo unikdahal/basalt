@@ -24,6 +24,7 @@ pub mod expr;
 pub mod io;
 pub mod logical_plan;
 pub mod physical_expr;
+pub mod physical_plan;
 pub mod plan;
 pub mod scalar;
 pub mod sql;
