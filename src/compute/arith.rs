@@ -14,12 +14,14 @@
 //! a real, deliberate trade of some vectorization for not risking a bogus
 //! error on don't-care data. Revisit once benchmarked.
 //!
-//! **Also simplified from the LLD's three-entry-point shape** (array⊕array,
-//! array⊕scalar, scalar⊕array, keeping scalars unmaterialized). This pass
-//! always materializes a scalar operand into a full array first via
-//! `ColumnarValue::into_array`. Correct, and a fine first version; the
-//! zero-materialization fast path is a benchmarked follow-up like the two
-//! deviations above.
+//! **Array⊕scalar and scalar⊕array take a dedicated fast path** that never
+//! materializes the scalar into a full array: benchmarking (`BENCHMARKS.md`)
+//! showed the original always-materialize-via-`into_array` version paying
+//! for a second N-element allocation and fill pass on every call — for
+//! `col + 1` that meant building a full array of `1`s just to throw it away,
+//! which dominated the timing and even inverted the expected speedup at
+//! large N. Array⊕array still goes through `into_array` (already a no-op
+//! there, since both sides are already arrays).
 
 use std::sync::Arc;
 
@@ -109,19 +111,97 @@ fn binary_numeric(
     int_op: impl Fn(i64, i64) -> Result<i64>,
     float_op: impl Fn(f64, f64) -> Result<f64>,
 ) -> Result<ColumnarValue> {
-    if let (ColumnarValue::Scalar(l), ColumnarValue::Scalar(r)) = (lhs, rhs) {
-        return Ok(ColumnarValue::Scalar(scalar_numeric(
-            l, r, &int_op, &float_op,
-        )?));
+    match (lhs, rhs) {
+        (ColumnarValue::Scalar(l), ColumnarValue::Scalar(r)) => Ok(ColumnarValue::Scalar(
+            scalar_numeric(l, r, &int_op, &float_op)?,
+        )),
+        (ColumnarValue::Array(l), ColumnarValue::Scalar(r)) => {
+            array_scalar_numeric(l.as_ref(), r, &int_op, &float_op, false)
+        }
+        (ColumnarValue::Scalar(l), ColumnarValue::Array(r)) => {
+            array_scalar_numeric(r.as_ref(), l, &int_op, &float_op, true)
+        }
+        (ColumnarValue::Array(l), ColumnarValue::Array(r)) => {
+            array_array_numeric(l.as_ref(), r.as_ref(), &int_op, &float_op)
+        }
     }
+}
 
-    let num_rows = match (lhs, rhs) {
-        (ColumnarValue::Array(a), _) => a.len(),
-        (_, ColumnarValue::Array(a)) => a.len(),
-        _ => unreachable!("both-scalar case handled above"),
-    };
-    let lhs_array = lhs.clone().into_array(num_rows)?;
-    let rhs_array = rhs.clone().into_array(num_rows)?;
+/// `array_scalar_numeric` never materializes the scalar operand — see the
+/// module doc comment. `scalar_on_left` preserves operand order for
+/// non-commutative ops (`sub`/`div`/`rem`): when the caller had
+/// `Scalar ⊕ Array`, the op must be applied as `op(scalar, array[i])`, not
+/// `op(array[i], scalar)`.
+fn array_scalar_numeric(
+    array: &dyn Array,
+    scalar: &ScalarValue,
+    int_op: impl Fn(i64, i64) -> Result<i64>,
+    float_op: impl Fn(f64, f64) -> Result<f64>,
+    scalar_on_left: bool,
+) -> Result<ColumnarValue> {
+    let num_rows = array.len();
+    match (array.data_type(), scalar) {
+        (crate::types::data_type::DataType::Int64, ScalarValue::Int64(s)) => {
+            let a = as_primitive::<Int64Type>(array)?;
+            let mut builder = PrimitiveBuilder::<Int64Type>::with_capacity(num_rows);
+            let Some(s) = *s else {
+                for _ in 0..num_rows {
+                    builder.append_null();
+                }
+                return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
+            };
+            for i in 0..num_rows {
+                if a.is_null(i) {
+                    builder.append_null();
+                    continue;
+                }
+                let v = a.value(i);
+                builder.append_value(if scalar_on_left {
+                    int_op(s, v)?
+                } else {
+                    int_op(v, s)?
+                });
+            }
+            Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        }
+        (crate::types::data_type::DataType::Float64, ScalarValue::Float64(s)) => {
+            let a = as_primitive::<Float64Type>(array)?;
+            let mut builder = PrimitiveBuilder::<Float64Type>::with_capacity(num_rows);
+            let Some(s) = *s else {
+                for _ in 0..num_rows {
+                    builder.append_null();
+                }
+                return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
+            };
+            for i in 0..num_rows {
+                if a.is_null(i) {
+                    builder.append_null();
+                    continue;
+                }
+                let v = a.value(i);
+                builder.append_value(if scalar_on_left {
+                    float_op(s, v)?
+                } else {
+                    float_op(v, s)?
+                });
+            }
+            Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        }
+        (at, st) => Err(BasaltError::Type {
+            message: format!(
+                "arithmetic requires matching numeric types, found {at} and {}",
+                st.data_type()
+            ),
+        }),
+    }
+}
+
+fn array_array_numeric(
+    lhs_array: &dyn Array,
+    rhs_array: &dyn Array,
+    int_op: impl Fn(i64, i64) -> Result<i64>,
+    float_op: impl Fn(f64, f64) -> Result<f64>,
+) -> Result<ColumnarValue> {
     if lhs_array.len() != rhs_array.len() {
         return Err(BasaltError::Internal(format!(
             "operand length mismatch: {} vs {}",
@@ -129,11 +209,12 @@ fn binary_numeric(
             rhs_array.len()
         )));
     }
+    let num_rows = lhs_array.len();
 
     match (lhs_array.data_type(), rhs_array.data_type()) {
         (crate::types::data_type::DataType::Int64, crate::types::data_type::DataType::Int64) => {
-            let l = as_primitive::<Int64Type>(lhs_array.as_ref())?;
-            let r = as_primitive::<Int64Type>(rhs_array.as_ref())?;
+            let l = as_primitive::<Int64Type>(lhs_array)?;
+            let r = as_primitive::<Int64Type>(rhs_array)?;
             let mut builder = PrimitiveBuilder::<Int64Type>::with_capacity(num_rows);
             for i in 0..num_rows {
                 if l.is_null(i) || r.is_null(i) {
@@ -148,8 +229,8 @@ fn binary_numeric(
             crate::types::data_type::DataType::Float64,
             crate::types::data_type::DataType::Float64,
         ) => {
-            let l = as_primitive::<Float64Type>(lhs_array.as_ref())?;
-            let r = as_primitive::<Float64Type>(rhs_array.as_ref())?;
+            let l = as_primitive::<Float64Type>(lhs_array)?;
+            let r = as_primitive::<Float64Type>(rhs_array)?;
             let mut builder = PrimitiveBuilder::<Float64Type>::with_capacity(num_rows);
             for i in 0..num_rows {
                 if l.is_null(i) || r.is_null(i) {
@@ -349,6 +430,43 @@ mod tests {
         let result = as_float64(&result);
         assert_eq!(result.value(0), 0.75);
         assert_eq!(result.value(1), 1.25);
+    }
+
+    #[test]
+    fn scalar_minus_array_preserves_operand_order() {
+        // Regression test for the array⊕scalar fast path added to avoid
+        // materializing the scalar into a full array: `sub`/`div`/`rem`
+        // aren't commutative, so `10 - col` must not silently become
+        // `col - 10`.
+        let lhs = ColumnarValue::Scalar(ScalarValue::Int64(Some(10)));
+        let rhs = int_array(&[Some(1), Some(4)]);
+        let result = sub(&lhs, &rhs).unwrap();
+        let result = as_int64(&result);
+        assert_eq!(result.value(0), 9);
+        assert_eq!(result.value(1), 6);
+    }
+
+    #[test]
+    fn array_plus_null_scalar_is_all_null_without_materializing_a_value() {
+        let lhs = int_array(&[Some(1), Some(2), Some(3)]);
+        let rhs = ColumnarValue::Scalar(ScalarValue::Int64(None));
+        let result = add(&lhs, &rhs).unwrap();
+        let result = as_int64(&result);
+        assert!(result.is_null(0));
+        assert!(result.is_null(1));
+        assert!(result.is_null(2));
+    }
+
+    #[test]
+    fn array_scalar_null_row_in_array_is_null_not_a_spurious_overflow() {
+        let lhs = int_array(&[None, Some(i64::MAX)]);
+        let rhs = ColumnarValue::Scalar(ScalarValue::Int64(Some(1)));
+        let result = add(&lhs, &rhs);
+        assert!(matches!(result, Err(BasaltError::NumericOverflow)));
+
+        let lhs = int_array(&[None]);
+        let result = add(&lhs, &rhs).unwrap();
+        assert!(as_int64(&result).is_null(0));
     }
 
     #[test]
