@@ -22,6 +22,7 @@ pub mod compute;
 pub mod exec;
 pub mod expr;
 pub mod io;
+pub mod logical_plan;
 pub mod physical_expr;
 pub mod plan;
 pub mod scalar;

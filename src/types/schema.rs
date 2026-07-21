@@ -47,6 +47,19 @@ impl Schema {
         Ok(Schema { fields })
     }
 
+    /// Builds a schema without the duplicate-name check `new` enforces.
+    ///
+    /// A single table's schema has no legitimate reason for two columns to
+    /// share a name, so `new` rejects that as almost certainly a mistake.
+    /// A *joined* schema is different: `orders JOIN order_items` both
+    /// having an `id` column is completely ordinary SQL, and real engines
+    /// resolve the ambiguity by table qualification rather than by
+    /// forbidding it upstream. `LogicalPlanBuilder::join` uses this
+    /// constructor for exactly that reason — see its call site.
+    pub fn new_allow_duplicate_names(fields: Vec<Field>) -> Self {
+        Schema { fields }
+    }
+
     pub fn fields(&self) -> &[Field] {
         &self.fields
     }
@@ -100,6 +113,17 @@ mod tests {
             Field::new("a", DataType::Utf8, false),
         ]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn new_allow_duplicate_names_permits_what_new_rejects() {
+        let schema = Schema::new_allow_duplicate_names(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("a", DataType::Utf8, false),
+        ]);
+        assert_eq!(schema.len(), 2);
+        assert_eq!(schema.field(0).unwrap().name, "a");
+        assert_eq!(schema.field(1).unwrap().name, "a");
     }
 
     #[test]
