@@ -167,23 +167,21 @@ impl PhysicalPlanner {
                 let build = self.create_physical_plan(left)?;
                 let probe = self.create_physical_plan(right)?;
                 if !on.is_empty() {
-                    if filter.is_some() {
-                        return Err(BasaltError::Internal(
-                            "HashJoinExec does not yet support a residual filter alongside \
-                             equi-join keys"
-                                .to_string(),
-                        ));
-                    }
                     let physical_on = on
                         .iter()
                         .map(|(l, r)| {
                             Ok((self.create_physical_expr(l)?, self.create_physical_expr(r)?))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    Ok(Arc::new(HashJoinExec::new(
+                    let physical_filter = filter
+                        .as_ref()
+                        .map(|f| self.create_physical_expr(f))
+                        .transpose()?;
+                    Ok(Arc::new(HashJoinExec::with_filter(
                         build,
                         probe,
                         physical_on,
+                        physical_filter,
                         *join_type,
                         schema.clone(),
                     )))

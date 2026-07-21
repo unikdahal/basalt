@@ -1,17 +1,22 @@
 //! `HashJoinExec`. See design-docs/basalt-phase2-lld.md §7.1.
 //!
-//! **Two explicit, documented scope decisions relative to the LLD:**
+//! **One remaining explicit, documented scope decision relative to the LLD:**
+//! both sides are fully materialized, not just the build side. The LLD's
+//! probe side streams; this implementation concatenates it first (the same
+//! `compute::concat` pattern `SortExec`/`AggregateExec` already use for
+//! their own pipeline-breaking). Real streaming-probe with bounded memory
+//! is a legitimate follow-up; buffering both sides is simplest to get
+//! *correct* first, and this operator was always going to buffer the build
+//! side regardless.
 //!
-//! 1. **Both sides are fully materialized**, not just the build side. The
-//!    LLD's probe side streams; this implementation concatenates it first
-//!    (the same `compute::concat` pattern `SortExec`/`AggregateExec` already
-//!    use for their own pipeline-breaking). Real streaming-probe with
-//!    bounded memory is a legitimate follow-up; buffering both sides is
-//!    simplest to get *correct* first, and this operator was always going
-//!    to buffer the build side regardless.
-//! 2. **The residual `filter` (non-equi predicate) is not implemented.**
-//!    Equi-joins — the overwhelming majority of real queries — are fully
-//!    supported; a query needing `ON a.x = b.y AND a.z < b.w` isn't yet.
+//! **The residual `filter` (non-equi predicate alongside equi-join keys,
+//! e.g. `ON a.x = b.y AND a.z < b.w`) is supported.** It's evaluated once
+//! per probe row, over just that row's equi-matched build-side candidates
+//! (gathered via `take`, broadcast against the single probe row) — not
+//! evaluated for every build row, only the ones the hash lookup already
+//! narrowed down to. A candidate pair only counts as "matched" (for
+//! `build_matched`/`probe_matched`, and therefore for every join type's
+//! emit rule) once it passes both the equi-key lookup *and* this filter.
 //!
 //! **Join-type convention, spelled out because "left"/"right" is genuinely
 //! ambiguous between SQL-table-position and build/probe-role:** this
@@ -35,7 +40,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::super::plan::{BatchStream, ExecutionPlan};
-use crate::array::array::ArrayRef;
+use crate::array::array::{as_boolean, Array, ArrayRef};
 use crate::batch::ColumnarBatch;
 use crate::compute::index::UInt32Builder;
 use crate::compute::take::take;
@@ -44,7 +49,7 @@ use crate::error::{BasaltError, Result};
 use crate::logical_plan::JoinType;
 use crate::physical_expr::PhysicalExprRef;
 use crate::physical_plan::aggregate::group_keys::GroupKeyEncoder;
-use crate::types::schema::SchemaRef;
+use crate::types::schema::{Schema, SchemaRef};
 
 #[derive(Debug)]
 pub struct HashJoinExec {
@@ -52,8 +57,13 @@ pub struct HashJoinExec {
     probe: Arc<dyn ExecutionPlan>,
     /// `(build_key_expr, probe_key_expr)` pairs — an equi-join condition per pair.
     on: Vec<(PhysicalExprRef, PhysicalExprRef)>,
+    /// A non-equi residual, evaluated against `combined_schema` (build
+    /// fields followed by probe fields) regardless of what `schema` (the
+    /// actual output) keeps for semi/anti joins.
+    filter: Option<PhysicalExprRef>,
     join_type: JoinType,
     schema: SchemaRef,
+    combined_schema: SchemaRef,
 }
 
 impl HashJoinExec {
@@ -64,12 +74,31 @@ impl HashJoinExec {
         join_type: JoinType,
         schema: SchemaRef,
     ) -> Self {
+        Self::with_filter(build, probe, on, None, join_type, schema)
+    }
+
+    /// Like [`new`](Self::new), but with a non-equi residual predicate
+    /// (`ON a.x = b.y AND a.z < b.w`'s `a.z < b.w` part) evaluated against
+    /// each probe row's equi-matched build-side candidates.
+    pub fn with_filter(
+        build: Arc<dyn ExecutionPlan>,
+        probe: Arc<dyn ExecutionPlan>,
+        on: Vec<(PhysicalExprRef, PhysicalExprRef)>,
+        filter: Option<PhysicalExprRef>,
+        join_type: JoinType,
+        schema: SchemaRef,
+    ) -> Self {
+        let mut combined_fields = build.schema().fields().to_vec();
+        combined_fields.extend(probe.schema().fields().iter().cloned());
+        let combined_schema = Arc::new(Schema::new_allow_duplicate_names(combined_fields));
         HashJoinExec {
             build,
             probe,
             on,
+            filter,
             join_type,
             schema,
+            combined_schema,
         }
     }
 }
@@ -133,10 +162,11 @@ impl ExecutionPlan for HashJoinExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         match children.as_slice() {
-            [build, probe] => Ok(Arc::new(HashJoinExec::new(
+            [build, probe] => Ok(Arc::new(HashJoinExec::with_filter(
                 Arc::clone(build),
                 Arc::clone(probe),
                 self.on.clone(),
+                self.filter.clone(),
                 self.join_type,
                 self.schema.clone(),
             ))),
@@ -199,13 +229,61 @@ impl ExecutionPlan for HashJoinExec {
             }
             let key = &probe_encoded[probe_offsets[row] as usize..probe_offsets[row + 1] as usize];
             if let Some(build_positions) = build_map.get(key) {
-                for &b in build_positions {
-                    pair_build.append_value(b);
-                    pair_probe.append_value(row as u32);
-                    build_matched[b as usize] = true;
+                if build_positions.is_empty() {
+                    continue;
                 }
-                if !build_positions.is_empty() {
-                    probe_matched[row] = true;
+                match &self.filter {
+                    None => {
+                        for &b in build_positions {
+                            pair_build.append_value(b);
+                            pair_probe.append_value(row as u32);
+                            build_matched[b as usize] = true;
+                        }
+                        probe_matched[row] = true;
+                    }
+                    Some(filter) => {
+                        // Only the equi-matched candidates are gathered and
+                        // evaluated — the hash lookup already narrowed the
+                        // (build_rows x probe_rows) space down to this,
+                        // never the residual filter against every build row.
+                        let mut idx_b = UInt32Builder::with_capacity(build_positions.len());
+                        for &b in build_positions {
+                            idx_b.append_value(b);
+                        }
+                        let idx_b = idx_b.finish();
+                        let mut idx_p = UInt32Builder::with_capacity(build_positions.len());
+                        for _ in 0..build_positions.len() {
+                            idx_p.append_value(row as u32);
+                        }
+                        let idx_p = idx_p.finish();
+
+                        let mut combined_columns: Vec<ArrayRef> = Vec::with_capacity(
+                            build_batch.num_columns() + probe_batch.num_columns(),
+                        );
+                        for i in 0..build_batch.num_columns() {
+                            combined_columns
+                                .push(take(build_batch.column(i).unwrap().as_ref(), &idx_b)?);
+                        }
+                        for i in 0..probe_batch.num_columns() {
+                            combined_columns
+                                .push(take(probe_batch.column(i).unwrap().as_ref(), &idx_p)?);
+                        }
+                        let combined =
+                            ColumnarBatch::try_new(self.combined_schema.clone(), combined_columns)?;
+
+                        let residual = filter
+                            .evaluate(&combined)?
+                            .into_array(build_positions.len())?;
+                        let residual = as_boolean(residual.as_ref())?;
+                        for (i, &b) in build_positions.iter().enumerate() {
+                            if residual.is_valid(i) && residual.value(i) {
+                                pair_build.append_value(b);
+                                pair_probe.append_value(row as u32);
+                                build_matched[b as usize] = true;
+                                probe_matched[row] = true;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -313,8 +391,10 @@ mod tests {
     use crate::array::array::{as_primitive, Array};
     use crate::array::primitive::PrimitiveBuilder;
     use crate::array::types::Int64Type;
+    use crate::physical_expr::binary::BinaryExpr;
     use crate::physical_expr::column::ColumnExpr;
     use crate::physical_plan::scan::MemoryScanExec;
+    use crate::types::coercion::BinaryOp;
     use crate::types::data_type::DataType;
     use crate::types::schema::{Field, Schema};
 
@@ -549,5 +629,75 @@ mod tests {
             .collect::<Result<Vec<_>>>()
             .unwrap();
         assert_eq!(batches[0].num_rows(), 0);
+    }
+
+    #[test]
+    fn residual_filter_narrows_equi_matches() {
+        // Equi-key "key" matches (1,1) and (1,1) again (two build rows share
+        // key 1); the residual bval < pval should keep only the pair where
+        // the build value is actually smaller.
+        let build = side_batch(side_schema("bval"), &[Some(1), Some(1)], &[5, 50]);
+        let probe = side_batch(side_schema("pval"), &[Some(1)], &[10]);
+        let build_schema = build.schema().clone();
+        let probe_schema = probe.schema().clone();
+        let build_exec = Arc::new(MemoryScanExec::new(build_schema, vec![build]));
+        let probe_exec = Arc::new(MemoryScanExec::new(probe_schema, vec![probe]));
+
+        // combined layout: [bkey, bval, pkey, pval] -> bval is column 1, pval is column 3
+        let residual = Arc::new(BinaryExpr::new(
+            Arc::new(ColumnExpr::new(1)),
+            BinaryOp::Lt,
+            Arc::new(ColumnExpr::new(3)),
+        ));
+        let join = HashJoinExec::with_filter(
+            build_exec,
+            probe_exec,
+            vec![(Arc::new(ColumnExpr::new(0)), Arc::new(ColumnExpr::new(0)))],
+            Some(residual),
+            JoinType::Inner,
+            output_schema(),
+        );
+        let batches: Vec<_> = join
+            .execute(0)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(batches[0].num_rows(), 1);
+        assert_eq!(int_col(&batches[0], 1), vec![Some(5)]); // only bval=5 < pval=10
+    }
+
+    #[test]
+    fn residual_filter_affects_outer_join_unmatched_bookkeeping() {
+        // Equi-key matches (1,1), but the residual excludes it entirely —
+        // for a Left join the probe row must then show up as unmatched
+        // (nulls on the build side), not as if it had a real match.
+        let build = side_batch(side_schema("bval"), &[Some(1)], &[100]);
+        let probe = side_batch(side_schema("pval"), &[Some(1)], &[1]);
+        let build_schema = build.schema().clone();
+        let probe_schema = probe.schema().clone();
+        let build_exec = Arc::new(MemoryScanExec::new(build_schema, vec![build]));
+        let probe_exec = Arc::new(MemoryScanExec::new(probe_schema, vec![probe]));
+
+        let residual = Arc::new(BinaryExpr::new(
+            Arc::new(ColumnExpr::new(1)),
+            BinaryOp::Lt,
+            Arc::new(ColumnExpr::new(3)),
+        )); // bval < pval: 100 < 1 is false
+        let join = HashJoinExec::with_filter(
+            build_exec,
+            probe_exec,
+            vec![(Arc::new(ColumnExpr::new(0)), Arc::new(ColumnExpr::new(0)))],
+            Some(residual),
+            JoinType::Left,
+            output_schema(),
+        );
+        let batches: Vec<_> = join
+            .execute(0)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(batches[0].num_rows(), 1);
+        assert!(int_col(&batches[0], 0)[0].is_none()); // build side nulled out
+        assert_eq!(int_col(&batches[0], 2), vec![Some(1)]); // probe row still present
     }
 }
