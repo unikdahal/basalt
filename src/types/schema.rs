@@ -1,7 +1,14 @@
 //! `Field` and `Schema`. See LLD §2.6.
 
+use std::sync::Arc;
+
 use super::data_type::DataType;
 use crate::error::{BasaltError, Result};
+
+/// Every batch in a Phase 2 stream shares one schema — cloning it per batch
+/// would be a real cost at `DEFAULT_BATCH_SIZE` granularity. See
+/// design-docs/basalt-phase2-lld.md §3.5.
+pub type SchemaRef = Arc<Schema>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {

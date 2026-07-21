@@ -161,6 +161,47 @@ fn map_string_to_primitive<To: crate::array::types::ArrowPrimitiveType>(
     Ok(Arc::new(builder.finish()))
 }
 
+/// Cast a single `ScalarValue`, for `physical_expr::CastExpr`'s scalar path.
+///
+/// Reuses Phase 1's `Value::cast_to` (the exact same semantic matrix —
+/// non-finite/out-of-range float rejection included) rather than
+/// re-deriving cast rules a third time, converting through `Value`'s
+/// untyped null at the boundary since `Value::cast_to` already special-cases
+/// it (`Value::Null` always maps back to whichever `ScalarValue::T(None)`
+/// the target type needs).
+///
+/// # Errors
+/// Same as [`cast`]: unsupported conversions or values that don't fit the
+/// target type.
+pub fn cast_scalar(
+    value: &crate::scalar::ScalarValue,
+    to: DataType,
+) -> Result<crate::scalar::ScalarValue> {
+    use crate::scalar::ScalarValue;
+    use crate::types::value::Value;
+
+    let v = match value {
+        ScalarValue::Int64(Some(x)) => Value::Int64(*x),
+        ScalarValue::Float64(Some(x)) => Value::Float64(*x),
+        ScalarValue::Utf8(Some(x)) => Value::Utf8(x.clone()),
+        ScalarValue::Boolean(Some(x)) => Value::Boolean(*x),
+        _ => Value::Null,
+    };
+    let casted = v.cast_to(to)?;
+    Ok(match casted {
+        Value::Null => match to {
+            DataType::Int64 => ScalarValue::Int64(None),
+            DataType::Float64 => ScalarValue::Float64(None),
+            DataType::Utf8 => ScalarValue::Utf8(None),
+            DataType::Boolean => ScalarValue::Boolean(None),
+        },
+        Value::Int64(x) => ScalarValue::Int64(Some(x)),
+        Value::Float64(x) => ScalarValue::Float64(Some(x)),
+        Value::Utf8(x) => ScalarValue::Utf8(Some(x)),
+        Value::Boolean(x) => ScalarValue::Boolean(Some(x)),
+    })
+}
+
 fn map_string_to_boolean(src: &crate::array::string::StringArray) -> Result<ArrayRef> {
     let mut builder = BooleanBuilder::with_capacity(src.len());
     for i in 0..src.len() {
@@ -271,5 +312,25 @@ mod tests {
         let arr = int_array(&[Some(1), Some(2)]);
         let result = cast(arr.as_ref(), DataType::Int64).unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn cast_scalar_round_trips_int_to_float() {
+        use crate::scalar::ScalarValue;
+        let result = cast_scalar(&ScalarValue::Int64(Some(3)), DataType::Float64).unwrap();
+        assert_eq!(result, ScalarValue::Float64(Some(3.0)));
+    }
+
+    #[test]
+    fn cast_scalar_null_stays_null_of_the_target_type() {
+        use crate::scalar::ScalarValue;
+        let result = cast_scalar(&ScalarValue::Int64(None), DataType::Utf8).unwrap();
+        assert_eq!(result, ScalarValue::Utf8(None));
+    }
+
+    #[test]
+    fn cast_scalar_rejects_non_finite_float_to_int() {
+        use crate::scalar::ScalarValue;
+        assert!(cast_scalar(&ScalarValue::Float64(Some(f64::NAN)), DataType::Int64).is_err());
     }
 }
