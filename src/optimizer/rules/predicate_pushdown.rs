@@ -255,6 +255,11 @@ fn push_through_join(input: Arc<LogicalPlan>, predicate: Expr) -> Result<Transfo
         let touches_right = cols.iter().any(|&c| c >= left_width);
 
         match (touches_left, touches_right, *join_type) {
+            // Left-only: safe for Inner/Left (left is preserved or both
+            // sides matched); never safe for Right (left is the
+            // null-producing side there — the mirror of the Right-only/
+            // Left-join case below).
+            (true, false, JoinType::Right) => residual.push(conjunct),
             (true, false, _) => push_left.push(conjunct),
             // Right-only: safe for Inner/Right (right is preserved or
             // both sides matched); never safe for Left (right is the
@@ -539,6 +544,34 @@ mod tests {
                         filter.is_none(),
                         "must not become part of Join.filter either"
                     );
+                }
+            }
+            other => panic!("expected Filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn right_join_left_only_predicate_is_never_pushed_to_the_left() {
+        // The mirror of the LEFT JOIN case above: for a RIGHT JOIN, left
+        // is the null-producing side, so a left-only predicate must stay
+        // a post-join Filter, never a pre-join filter on the left side.
+        let predicate = Expr::Binary {
+            left: Box::new(col(0)), // column 0 = left side's column 0
+            op: BinaryOp::Gt,
+            right: Box::new(Expr::Literal(Value::Int64(5))),
+        };
+        let plan = LogicalPlan::Filter {
+            input: Arc::new(join(JoinType::Right)),
+            predicate: predicate.clone(),
+        };
+        let result = PredicatePushdown.apply(plan, &NoStatistics).unwrap();
+        assert!(!result.is_yes(), "must not push a left-side predicate through a RIGHT JOIN");
+        match result.into_inner() {
+            LogicalPlan::Filter { input, predicate: p } => {
+                assert_eq!(p, predicate);
+                if let LogicalPlan::Join { left, filter, .. } = input.as_ref() {
+                    assert!(matches!(left.as_ref(), LogicalPlan::TableScan { .. }), "left side must stay unfiltered");
+                    assert!(filter.is_none(), "must not become part of Join.filter either");
                 }
             }
             other => panic!("expected Filter, got {other:?}"),
